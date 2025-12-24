@@ -1,84 +1,116 @@
 {
-  "version": "2.0.0",
-  "inputs": [
-    {
-      "id": "jdwpPid",
-      "type": "promptString",
-      "description": "JDWP pid（先运行 task: adb: list JDWP 查看，然后填其中一个数字）",
-      "default": ""
-    }
-  ],
-  "tasks": [
-    {
-      "label": "gradle: assembleDebug",
-      "type": "shell",
-      "command": "./gradlew",
-      "args": [":app:assembleDebug"],
-      "options": {
-        "env": {
-          "JAVA_HOME": "${env:HOME}/.jdk/jdk-21.0.8/jdk-21.0.8+9/Contents/Home",
-          "PATH": "${env:HOME}/.jdk/jdk-21.0.8/jdk-21.0.8+9/Contents/Home/bin:${env:PATH}"
-        }
-      },
-      "problemMatcher": ["$gradle"],
-      "group": "build"
-    },
-    {
-      "label": "gradle: installDebug",
-      "type": "shell",
-      "command": "./gradlew",
-      "args": [":app:installDebug"],
-      "options": {
-        "env": {
-          "JAVA_HOME": "${env:HOME}/.jdk/jdk-21.0.8/jdk-21.0.8+9/Contents/Home",
-          "PATH": "${env:HOME}/.jdk/jdk-21.0.8/jdk-21.0.8+9/Contents/Home/bin:${env:PATH}"
-        }
-      },
-      "problemMatcher": ["$gradle"]
-    },
-    {
-      "label": "adb: list JDWP",
-      "type": "shell",
-      "command": "/Users/beijihu/Library/Android/sdk/platform-tools/adb",
-      "args": ["jdwp"],
-      "problemMatcher": []
-    },
-    {
-      "label": "adb: forward JDWP to 8700",
-      "type": "shell",
-      "command": "/Users/beijihu/Library/Android/sdk/platform-tools/adb",
-      "args": [
-        "forward",
-        "tcp:8700",
-        "jdwp:${input:jdwpPid}"
-      ],
-      "problemMatcher": []
-    },
-    {
-      "label": "adb: start MainActivity",
-      "type": "shell",
-      "command": "/Users/beijihu/Library/Android/sdk/platform-tools/adb",
-      "args": [
-        "shell",
-        "am",
-        "start",
-        "-n",
-        "com.guaishoudejia.x4doublesysfserv/.MainActivity"
-      ],
-      "problemMatcher": []
-    },
-    {
-      "label": "adb: logcat (X4Service)",
-      "type": "shell",
-      "command": "/Users/beijihu/Library/Android/sdk/platform-tools/adb",
-      "args": [
-        "logcat",
-        "-s",
-        "X4Service",
-        "EInkA11y"
-      ],
-      "isBackground": true,
-      "problemMatcher": []
-    }
-  ]
+	"version": "2.0.0",
+	"inputs": [
+		{
+			"id": "jdwpPid",
+			"type": "promptString",
+			"description": "JDWP pid（先运行 task: adb: list JDWP 查看，然后填其中一个数字）",
+			"default": ""
+		}
+	],
+	"tasks": [
+		{
+			"label": "gradle: assembleDebug",
+			"type": "shell",
+			"command": "./gradlew",
+			"args": [
+				":app:assembleDebug"
+			],
+			"options": {
+				"env": {
+					"JAVA_HOME": "${env:HOME}/.jdk/jdk-21.0.8/jdk-21.0.8+9/Contents/Home",
+					"PATH": "${env:HOME}/.jdk/jdk-21.0.8/jdk-21.0.8+9/Contents/Home/bin:${env:PATH}"
+				}
+			},
+			"problemMatcher": [
+				"$gradle"
+			],
+			"group": "build"
+		},
+		{
+			"label": "gradle: installDebug",
+			"type": "shell",
+			"command": "./gradlew",
+			"args": [
+				":app:installDebug"
+			],
+			"options": {
+				"env": {
+					"JAVA_HOME": "${env:HOME}/.jdk/jdk-21.0.8/jdk-21.0.8+9/Contents/Home",
+					"PATH": "${env:HOME}/.jdk/jdk-21.0.8/jdk-21.0.8+9/Contents/Home/bin:${env:PATH}"
+				}
+			},
+			"problemMatcher": [
+				"$gradle"
+			]
+		},
+		{
+			"label": "adb: list JDWP",
+			"type": "shell",
+			"command": "/Users/beijihu/Library/Android/sdk/platform-tools/adb",
+			"args": [
+				"jdwp"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "adb: forward JDWP to 8700",
+			"type": "shell",
+			"command": "/Users/beijihu/Library/Android/sdk/platform-tools/adb",
+			"args": [
+				"forward",
+				"tcp:8700",
+				"jdwp:${input:jdwpPid}"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "adb: start MainActivity",
+			"type": "shell",
+			"command": "/Users/beijihu/Library/Android/sdk/platform-tools/adb",
+			"args": [
+				"shell",
+				"am",
+				"start",
+				"-n",
+				"com.guaishoudejia.x4doublesysfserv/.MainActivity"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "adb: logcat (X4Service)",
+			"type": "shell",
+			"command": "/Users/beijihu/Library/Android/sdk/platform-tools/adb",
+			"args": [
+				"logcat",
+				"-s",
+				"X4Service",
+				"EInkA11y"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "gradle: build and install",
+			"type": "shell",
+			"command": ".\\gradlew.bat",
+			"args": [
+				":app:assembleDebug",
+				":app:installDebug"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "gradle: build and install",
+			"type": "shell",
+			"command": ".\\gradlew.bat",
+			"args": [
+				":app:assembleDebug",
+				":app:installDebug"
+			],
+			"isBackground": false,
+			"group": "build"
+		}
+	]
 }
