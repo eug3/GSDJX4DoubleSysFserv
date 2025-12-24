@@ -2,6 +2,7 @@
 package com.guaishoudejia.x4doublesysfserv
 
 import android.annotation.SuppressLint
+import android.Manifest
 import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
@@ -12,6 +13,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.BluetoothLeScanner
@@ -19,6 +21,7 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.content.res.Resources
 import android.graphics.Bitmap
@@ -33,12 +36,19 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import android.view.KeyEvent
 import android.view.View
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.CookieManager
 import androidx.core.app.NotificationCompat
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -64,6 +74,208 @@ class X4Service : Service() {
     private var webViewLoaded = false
     private var lastLoadedUrl: String? = null
     private var webViewLoadFinishedAtMs: Long = 0L
+
+    @Volatile private var targetUrl: String = DEFAULT_TARGET_URL
+
+    private fun loadTargetUrlFromPrefs(): String? {
+        return try {
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(PREF_KEY_TARGET_URL, null)
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun persistTargetUrl(url: String) {
+        try {
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(PREF_KEY_TARGET_URL, url)
+                .apply()
+        } catch (_: Throwable) {
+        }
+    }
+
+        // 默认做一点放大（字更大），更适合 480x800 的电子墨水屏。
+        // 可通过 WebSocket 命令 ZOOM 调整。
+        @Volatile private var contentScale: Float = 1.2f
+
+        private fun scaleToPercent(scale: Float): Int = (scale * 100f).toInt().coerceIn(20, 300)
+
+        private fun applyScaleToWebView(wv: WebView) {
+                val p = scaleToPercent(contentScale)
+                try {
+                        wv.settings.textZoom = p
+                } catch (_: Throwable) {
+                }
+                try {
+                        wv.setInitialScale(p)
+                } catch (_: Throwable) {
+                }
+
+                // Also enforce via viewport + CSS zoom (some sites ignore one of these).
+                try {
+                        val scaleStr = String.format(java.util.Locale.US, "%.2f", contentScale)
+                        val js = """
+                                (function() {
+                                    try {
+                                        var head = document.head || document.getElementsByTagName('head')[0];
+                                        if (!head) return 'nohead';
+                                        var meta = document.querySelector('meta[name=viewport]');
+                                        if (!meta) { meta = document.createElement('meta'); meta.name = 'viewport'; head.appendChild(meta); }
+                                        meta.content = 'width=${TARGET_WIDTH}, height=${TARGET_HEIGHT}, initial-scale=${scaleStr}, maximum-scale=${scaleStr}, user-scalable=no, viewport-fit=cover';
+                                        document.documentElement.style.margin = '0';
+                                        if (document.body) document.body.style.margin = '0';
+                                        document.documentElement.style.zoom = '${scaleStr}';
+                                        if (document.body) document.body.style.zoom = '${scaleStr}';
+                                        return 'ok';
+                                    } catch (e) {
+                                        return 'err:' + e;
+                                    }
+                                })();
+                        """.trimIndent()
+                        wv.evaluateJavascript(js, null)
+                } catch (_: Throwable) {
+                }
+        }
+
+        private fun cleanupWeReadUi(wv: WebView) {
+                // Best-effort cleanup: remove fixed/sticky bars and the "open app" promo that steals vertical space.
+                try {
+                        val js = """
+                                (function(){
+                                    try {
+                                        function hide(el){ try{ el.style.setProperty('display','none','important'); el.style.setProperty('visibility','hidden','important'); }catch(e){} }
+                                        // Remove obvious promo text blocks
+                                        var walkers = document.querySelectorAll('body *');
+                                        for (var i=0;i<walkers.length;i++){
+                                            var el = walkers[i];
+                                            if (!el || !el.innerText) continue;
+                                            var t = el.innerText;
+                                            if (t.indexOf('微信读书App')>=0 || t.indexOf('打开微信读书')>=0 || t.indexOf('添加微信读书')>=0){
+                                                hide(el);
+                                            }
+                                        }
+                                        // Hide fixed/sticky overlays near top/bottom
+                                        var all = document.querySelectorAll('body *');
+                                        var vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
+                                        for (var j=0;j<all.length;j++){
+                                            var e = all[j];
+                                            if (!e) continue;
+                                            var cs = window.getComputedStyle(e);
+                                            if (!cs) continue;
+                                            if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
+                                            var r = e.getBoundingClientRect();
+                                            if (!r) continue;
+                                            // only large overlays
+                                            if (r.height < 36) continue;
+                                            // near top or bottom
+                                            if (r.top < 120 || (vh - r.bottom) < 120) {
+                                                hide(e);
+                                            }
+                                        }
+                                        // Try to remove extra paddings
+                                        document.documentElement.style.padding = '0';
+                                        if (document.body) document.body.style.padding = '0';
+                                        return 'ok';
+                                    }catch(e){return 'err:'+e;}
+                                })();
+                        """.trimIndent()
+                        wv.evaluateJavascript(js, null)
+                } catch (_: Throwable) {
+                }
+        }
+
+    private val httpClient: OkHttpClient by lazy { OkHttpClient() }
+    private var webSocket: WebSocket? = null
+    private var wsUrl: String? = null
+    private var wsReconnectScheduled = false
+
+    private var enableBle: Boolean = false
+    private val wsPingRunnable = object : Runnable {
+        override fun run() {
+            val ws = webSocket
+            if (ws == null) return
+            try {
+                ws.send("PING")
+            } catch (_: Throwable) {
+            }
+            handler.postDelayed(this, 10_000)
+        }
+    }
+
+        private fun isWeReadBookLandingUrl(url: String?): Boolean {
+                if (url.isNullOrBlank()) return false
+                // Book landing page: /web/reader/<bookId> (no chapter suffix starting with 'k')
+                val prefix = "https://weread.qq.com/web/reader/"
+                if (!url.startsWith(prefix)) return false
+                val tail = url.removePrefix(prefix)
+                return tail.isNotBlank() && !tail.contains("k") && tail.length >= 20
+        }
+
+        private fun tryEnterWeReadReading(wv: WebView) {
+                // Best-effort: click "阅读" or "下一页" on landing page to enter the real reader view.
+                try {
+                        val js = """
+                                (function(){
+                                    try {
+                                        function clickByText(txt){
+                                            var els = document.querySelectorAll('button,a,div,span');
+                                            for (var i=0;i<els.length;i++){
+                                                var el = els[i];
+                                                if (!el) continue;
+                                                var t = (el.innerText||'').trim();
+                                                if (t === txt){
+                                                    try { el.click(); return 'clicked:'+txt; } catch(e) {}
+                                                }
+                                            }
+                                            return 'no:'+txt;
+                                        }
+                                        // prefer explicit "阅读" (book landing), fallback to next page.
+                                        var r = clickByText('阅读');
+                                        if (r.indexOf('clicked') === 0) return r;
+                                        r = clickByText('开始阅读');
+                                        if (r.indexOf('clicked') === 0) return r;
+                                        r = clickByText('下一页');
+                                        return r;
+                                    }catch(e){return 'err:'+e;}
+                                })();
+                        """.trimIndent()
+                        wv.evaluateJavascript(js, null)
+                } catch (_: Throwable) {
+                }
+        }
+
+        private fun clickWeReadNav(wv: WebView, label: String) {
+                // Click the in-page navigation buttons "上一页" / "下一页".
+                try {
+                        val js = """
+                                (function(){
+                                    try {
+                                        var btns = document.querySelectorAll('button,a');
+                                        for (var i=0;i<btns.length;i++){
+                                            var b = btns[i];
+                                            if (!b) continue;
+                                            var t = (b.innerText||'').trim();
+                                            if (t === '${label}') { b.click(); return 'clicked:${label}'; }
+                                        }
+                                        // fallback: text search
+                                        var els = document.querySelectorAll('body *');
+                                        for (var j=0;j<els.length;j++){
+                                            var e = els[j];
+                                            var tt = (e && e.innerText) ? e.innerText.trim() : '';
+                                            if (tt === '${label}') { try { e.click(); return 'clicked2:${label}'; } catch(ex) {} }
+                                        }
+                                        return 'notfound:${label}';
+                                    }catch(e){return 'err:'+e;}
+                                })();
+                        """.trimIndent()
+                        wv.evaluateJavascript(js, null)
+                } catch (_: Throwable) {
+                }
+        }
 
     private var isBleReady = false
 
@@ -130,11 +342,25 @@ class X4Service : Service() {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 Log.d(TAG, "Services discovered.")
                 isBleReady = true
+                enableCommandNotifications(gatt)
                 // If frames were already queued before BLE became ready, start flushing now.
                 sendNextPacket()
             } else {
                 Log.w(TAG, "onServicesDiscovered received: $status")
             }
+        }
+
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            handleCharacteristicChanged(characteristic.uuid, characteristic.value)
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+        ) {
+            handleCharacteristicChanged(characteristic.uuid, value)
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
@@ -147,11 +373,97 @@ class X4Service : Service() {
         }
     }
 
+    private fun enableCommandNotifications(gatt: BluetoothGatt) {
+        try {
+            val svc = gatt.getService(SERVICE_UUID)
+            val ch = svc?.getCharacteristic(CHARACTERISTIC_UUID_CMD)
+            if (ch == null) {
+                Log.w(TAG, "Command characteristic not found: $CHARACTERISTIC_UUID_CMD")
+                return
+            }
+
+            val ok = gatt.setCharacteristicNotification(ch, true)
+            if (!ok) {
+                Log.w(TAG, "setCharacteristicNotification returned false")
+            }
+
+            val cccd = ch.getDescriptor(UUID_CCCD)
+            if (cccd == null) {
+                Log.w(TAG, "CCCD descriptor not found on command characteristic")
+                return
+            }
+            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            val wrote = gatt.writeDescriptor(cccd)
+            Log.i(TAG, "Enable CMD notify: setNotification=$ok writeCccd=$wrote")
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to enable command notifications", t)
+        }
+    }
+
+    private fun handleCharacteristicChanged(uuid: UUID, value: ByteArray?) {
+        if (uuid != CHARACTERISTIC_UUID_CMD) return
+        val bytes = value ?: return
+        if (bytes.isEmpty()) return
+
+        val b = bytes[0].toInt() and 0xFF
+        val cmd = when (b) {
+            // also accept ASCII '1'..'4'
+            0x31 -> 1
+            0x32 -> 2
+            0x33 -> 3
+            0x34 -> 4
+            else -> b
+        }
+
+        Log.i(TAG, "CMD notify value=0x${b.toString(16)} cmd=$cmd")
+        handler.post {
+            applyWebCommand(cmd)
+        }
+    }
+
+    private fun applyWebCommand(cmd: Int) {
+        ensureWebViewStarted()
+        val wv = webView
+        if (wv == null) {
+            Log.w(TAG, "applyWebCommand: WebView is null")
+            return
+        }
+
+        when (cmd) {
+            CMD_OPEN -> {
+                ensureWebViewUrlLoaded(targetUrl)
+            }
+            CMD_NEXT -> {
+                // 向下翻/滚动
+                wv.evaluateJavascript(
+                    "(function(){var el=document.scrollingElement||document.documentElement||document.body; if(el){el.scrollBy(0, 640);} return el?el.scrollTop:0;})()",
+                    null
+                )
+            }
+            CMD_PREV -> {
+                // 向上翻/滚动
+                wv.evaluateJavascript(
+                    "(function(){var el=document.scrollingElement||document.documentElement||document.body; if(el){el.scrollBy(0, -640);} return el?el.scrollTop:0;})()",
+                    null
+                )
+            }
+            CMD_RELOAD -> {
+                wv.reload()
+            }
+            else -> {
+                Log.w(TAG, "Unknown cmd=$cmd (expected 1..4)")
+            }
+        }
+
+        // 以后如果你恢复成“按需抓图/发送”，这里可用 dirty 来触发立即刷新。
+        FrameSyncState.markDirty()
+    }
+
     private val renderRunnable = object : Runnable {
         override fun run() {
             // Keep the render pipeline alive; captures are done here (1Hz watchdog).
             ensureWebViewStarted()
-            ensureWebViewUrlLoaded(TARGET_URL)
+            ensureWebViewUrlLoaded(targetUrl)
             maybeCaptureAndSend()
             handler.postDelayed(this, 1000)
         }
@@ -160,6 +472,9 @@ class X4Service : Service() {
     override fun onCreate() {
         super.onCreate()
         acquireWakeLock()
+
+        Log.i(TAG, "Default contentScale=$contentScale")
+
         createNotificationChannel()
         val notification = createNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -192,6 +507,31 @@ class X4Service : Service() {
             Log.i(TAG, "uploadUrl missing; defaulting to $uploadUrl")
         }
 
+        wsUrl = intent.getStringExtra(EXTRA_WS_URL)
+        if (wsUrl.isNullOrBlank()) {
+            wsUrl = if (isEmulator()) EMULATOR_WS_URL else DEVICE_WS_URL
+            Log.i(TAG, "wsUrl missing; defaulting to $wsUrl")
+        }
+        connectWebSocketIfNeeded()
+
+        // Pick target URL from intent first, fallback to persisted preference.
+        val fromIntent = intent.getStringExtra(EXTRA_TARGET_URL)?.trim()
+        val persisted = loadTargetUrlFromPrefs()
+        val chosen = when {
+            !fromIntent.isNullOrBlank() -> fromIntent
+            !persisted.isNullOrBlank() -> persisted
+            else -> DEFAULT_TARGET_URL
+        }
+        if (chosen != targetUrl) {
+            Log.i(TAG, "Target URL set: $chosen")
+            targetUrl = chosen
+        }
+        if (!fromIntent.isNullOrBlank()) {
+            persistTargetUrl(fromIntent)
+        }
+
+        enableBle = intent.getBooleanExtra(EXTRA_ENABLE_BLE, false)
+
         // Clear previous debug frame so we can tell if a new one was generated.
         try {
             val outFile = File(cacheDir, "bleper_test.png")
@@ -205,9 +545,179 @@ class X4Service : Service() {
         handler.removeCallbacks(renderRunnable)
         handler.post(renderRunnable)
 
-        startBleScan()
+        if (enableBle && canUseBleScan()) {
+            startBleScan()
+        } else {
+            Log.i(TAG, "BLE scan disabled; keep rendering/uploading")
+        }
 
         return START_STICKY
+    }
+
+    private fun canUseBleScan(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+        } else {
+            // Pre-S scanning typically requires location permission.
+            checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun connectWebSocketIfNeeded() {
+        val url = wsUrl
+        if (url.isNullOrBlank()) return
+        if (webSocket != null) return
+
+        Log.i(TAG, "Connecting WebSocket: $url")
+        val request = Request.Builder().url(url).build()
+        webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                Log.i(TAG, "WebSocket connected")
+                wsReconnectScheduled = false
+                handler.removeCallbacks(wsPingRunnable)
+                handler.postDelayed(wsPingRunnable, 10_000)
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                handleRemoteCommand(text)
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Log.w(TAG, "WebSocket closing code=$code reason=$reason")
+                webSocket.close(code, reason)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                Log.w(TAG, "WebSocket closed code=$code reason=$reason")
+                this@X4Service.webSocket = null
+                handler.removeCallbacks(wsPingRunnable)
+                scheduleWsReconnect()
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.w(TAG, "WebSocket failure", t)
+                this@X4Service.webSocket = null
+                handler.removeCallbacks(wsPingRunnable)
+                scheduleWsReconnect()
+            }
+        })
+    }
+
+    private fun scheduleWsReconnect() {
+        if (wsReconnectScheduled) return
+        wsReconnectScheduled = true
+        handler.postDelayed({
+            wsReconnectScheduled = false
+            connectWebSocketIfNeeded()
+        }, 2000)
+    }
+
+    private fun handleRemoteCommand(raw: String) {
+        val text = raw.trim()
+        if (text.isEmpty()) return
+        Log.i(TAG, "WS cmd: $text")
+
+        // Supported formats:
+        // - Plain: UP/DOWN/LEFT/RIGHT, BTN1..BTN4, RELOAD
+        // - URL:<https://...>
+        // - JSON: {"cmd":"UP"} or {"cmd":"URL","url":"https://..."}
+
+        var parsedCmd: String
+        var parsedUrl: String?
+        var parsedZoom: Float? = null
+        if (text.startsWith("{")) {
+            try {
+                val obj = org.json.JSONObject(text)
+                parsedCmd = (obj.optString("cmd") ?: "").trim().uppercase()
+                parsedUrl = obj.optString("url")?.takeIf { it.isNotBlank() }
+                val z = obj.optString("zoom")?.trim()
+                if (!z.isNullOrBlank()) {
+                    parsedZoom = z.toFloatOrNull()
+                }
+            } catch (_: Throwable) {
+                parsedCmd = text.uppercase()
+                parsedUrl = null
+            }
+        } else if (text.startsWith("URL:", ignoreCase = true)) {
+            parsedCmd = "URL"
+            parsedUrl = text.substringAfter(":").trim()
+        } else if (text.startsWith("ZOOM", ignoreCase = true)) {
+            parsedCmd = "ZOOM"
+            parsedUrl = null
+            val tail = text.substringAfter(":", missingDelimiterValue = "").trim()
+            val u = if (tail.isNotBlank()) tail else text.substringAfter("_", missingDelimiterValue = "").trim()
+            val rawNum = u
+                .removeSuffix("%")
+                .trim()
+            val f = rawNum.toFloatOrNull()
+            if (f != null) {
+                parsedZoom = if (f > 3f) (f / 100f) else f
+            }
+        } else {
+            parsedCmd = text.uppercase()
+            parsedUrl = null
+        }
+
+        handler.post {
+            ensureWebViewStarted()
+            val wv = webView ?: return@post
+
+            fun sendKey(code: Int) {
+                wv.requestFocus()
+                wv.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+                wv.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+            }
+
+            when (parsedCmd) {
+                "BTN1", "UP" -> {
+                    wv.evaluateJavascript("window.scrollBy(0, -600)", null)
+                }
+                "BTN2", "DOWN" -> {
+                    wv.evaluateJavascript("window.scrollBy(0, 600)", null)
+                }
+                "BTN3", "LEFT", "BACK" -> {
+                    if (wv.canGoBack()) wv.goBack() else wv.evaluateJavascript("window.scrollTo(0, 0)", null)
+                }
+                "BTN4", "RIGHT", "FORWARD" -> {
+                    if (wv.canGoForward()) wv.goForward() else wv.reload()
+                }
+                "TAB" -> {
+                    sendKey(KeyEvent.KEYCODE_TAB)
+                }
+                "ENTER" -> {
+                    sendKey(KeyEvent.KEYCODE_ENTER)
+                }
+                "NEXT", "PAGEDOWN" -> {
+                    clickWeReadNav(wv, "下一页")
+                }
+                "PREV", "PAGEUP" -> {
+                    clickWeReadNav(wv, "上一页")
+                }
+                "RELOAD", "REFRESH" -> {
+                    wv.reload()
+                }
+                "URL" -> {
+                    val u = parsedUrl
+                    if (!u.isNullOrBlank()) {
+                        targetUrl = u
+                        persistTargetUrl(u)
+                        ensureWebViewUrlLoaded(u)
+                    }
+                }
+                "ZOOM" -> {
+                    val z = parsedZoom
+                    if (z != null) {
+                        contentScale = z.coerceIn(0.20f, 2.50f)
+                        applyScaleToWebView(wv)
+                        // re-clean after scale change
+                        cleanupWeReadUi(wv)
+                    }
+                }
+                else -> {
+                    // No-op for unknown command
+                }
+            }
+        }
     }
 
     private fun startBleScan() {
@@ -243,6 +753,8 @@ class X4Service : Service() {
         wv.setBackgroundColor(Color.WHITE)
         wv.isVerticalScrollBarEnabled = false
         wv.isHorizontalScrollBarEnabled = false
+        wv.isFocusable = true
+        wv.isFocusableInTouchMode = true
         // Offscreen rendering is more reliable with software layer.
         wv.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
 
@@ -250,8 +762,29 @@ class X4Service : Service() {
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
         s.loadsImagesAutomatically = true
-        s.useWideViewPort = true
-        s.loadWithOverviewMode = true
+
+        // Share cookies with the interactive WebView in MainActivity.
+        try {
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(true)
+            try {
+                cm.setAcceptThirdPartyCookies(wv, true)
+            } catch (_: Throwable) {
+            }
+            cm.flush()
+        } catch (_: Throwable) {
+        }
+        // Use Android Chrome UA (system default). This improves WeRead compatibility and typically
+        // reduces GPU tile memory pressure compared to desktop UA.
+        try {
+            s.userAgentString = WebSettings.getDefaultUserAgent(applicationContext)
+        } catch (_: Throwable) {
+        }
+        // Avoid implicit auto-scaling; we control viewport explicitly for 480x800.
+        s.useWideViewPort = false
+        s.loadWithOverviewMode = false
+        // Try to keep sizing stable across devices/emulators.
+        s.textZoom = scaleToPercent(contentScale)
         s.builtInZoomControls = false
         s.displayZoomControls = false
         s.cacheMode = WebSettings.LOAD_DEFAULT
@@ -264,6 +797,26 @@ class X4Service : Service() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 Log.i(TAG, "WebView onPageFinished url=$url")
+
+                                // Apply scale + cleanup. Do it multiple times because WeRead may inject UI after load.
+                                val v = view
+                                if (v != null) {
+                                        applyScaleToWebView(v)
+                                        cleanupWeReadUi(v)
+                                    if (isWeReadBookLandingUrl(url)) {
+                                        // On landing pages, try to enter real reading mode.
+                                        tryEnterWeReadReading(v)
+                                    }
+                                        handler.postDelayed({ applyScaleToWebView(v); cleanupWeReadUi(v) }, 800)
+                                    handler.postDelayed({
+                                        applyScaleToWebView(v)
+                                        cleanupWeReadUi(v)
+                                        if (isWeReadBookLandingUrl(url)) {
+                                            tryEnterWeReadReading(v)
+                                        }
+                                    }, 2000)
+                                }
+
                 webViewLoaded = true
                 webViewLoadFinishedAtMs = android.os.SystemClock.elapsedRealtime()
                 FrameSyncState.markDirty()
@@ -271,6 +824,7 @@ class X4Service : Service() {
         }
 
         // Ensure it has the right virtual size for rendering.
+        wv.setInitialScale(scaleToPercent(contentScale))
         val widthSpec = View.MeasureSpec.makeMeasureSpec(TARGET_WIDTH, View.MeasureSpec.EXACTLY)
         val heightSpec = View.MeasureSpec.makeMeasureSpec(TARGET_HEIGHT, View.MeasureSpec.EXACTLY)
         wv.measure(widthSpec, heightSpec)
@@ -331,6 +885,9 @@ class X4Service : Service() {
             // If it's already stable, this is a no-op delay across ticks because of 1Hz throttle.
             val bitmap = Bitmap.createBitmap(TARGET_WIDTH, TARGET_HEIGHT, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
+            // Prevent unpainted regions (transparent/black) from becoming dither noise
+            // after grayscale/threshold processing.
+            canvas.drawColor(Color.WHITE)
             wv.draw(canvas)
 
             val processedBitmap = processImage(bitmap)
@@ -601,6 +1158,11 @@ class X4Service : Service() {
         super.onDestroy()
         handler.removeCallbacks(renderRunnable)
         try {
+            webSocket?.close(1000, "service destroy")
+        } catch (_: Exception) {
+        }
+        webSocket = null
+        try {
             webView?.stopLoading()
         } catch (_: Exception) {
         }
@@ -635,19 +1197,39 @@ class X4Service : Service() {
         // 需求：宽 480，高 800
         private const val TARGET_WIDTH = 480
         private const val TARGET_HEIGHT = 800
-        private const val TARGET_URL = "https://weread.qq.com/web/reader/a57325c05c8ed3a57224187ka0232590317ba02ffd918a0"
+        private const val DEFAULT_TARGET_URL = "https://weread.qq.com/"
+
+        private const val PREFS_NAME = "x4service"
+        private const val PREF_KEY_TARGET_URL = "target_url"
 
         // 默认上传到 18080 服务（与 MainActivity 保持一致）
         private const val EMULATOR_UPLOAD_URL = "http://10.0.2.2:18080/image"
         private const val DEVICE_UPLOAD_URL = "http://192.168.31.105:18080/image"
+
+        // WebSocket：Python BlePer 测试端（可通过 EXTRA_WS_URL 覆盖）
+        // 默认复用 18080 端口：HTTP /image + WS /ws
+        private const val EMULATOR_WS_URL = "ws://10.0.2.2:18080/ws"
+        private const val DEVICE_WS_URL = "ws://192.168.31.105:18080/ws"
 
         private fun isEmulator(): Boolean {
             val fp = Build.FINGERPRINT
             return fp.contains("generic") || fp.contains("emulator") || fp.contains("sdk_gphone")
         }
         val SERVICE_UUID = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb")
+        // 发送显示数据：Android -> 外设
         val CHARACTERISTIC_UUID_DATA = UUID.fromString("0000fff2-0000-1000-8000-00805f9b34fb")
+        // 接收按钮命令：外设 -> Android（notify）
+        val CHARACTERISTIC_UUID_CMD = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
+        private val UUID_CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        private const val CMD_OPEN = 1
+        private const val CMD_NEXT = 2
+        private const val CMD_PREV = 3
+        private const val CMD_RELOAD = 4
         const val EXTRA_UPLOAD_URL = "EXTRA_UPLOAD_URL"
+        const val EXTRA_WS_URL = "EXTRA_WS_URL"
+        const val EXTRA_ENABLE_BLE = "EXTRA_ENABLE_BLE"
+        const val EXTRA_TARGET_URL = "EXTRA_TARGET_URL"
         const val ACTION_STOP_SERVICE = "ACTION_STOP_SERVICE"
     }
 }
