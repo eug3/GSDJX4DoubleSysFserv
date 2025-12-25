@@ -53,6 +53,7 @@ class GeckoActivity : ComponentActivity() {
     private val backendUrl = "http://10.0.2.2:18080" // Emulator: 10.0.2.2; Real device: replace with PC LAN IP
     private val backendEnabled = false // 关闭远端，使用本地 GeckoView 抓帧
     private var geckoView: GeckoView? = null
+    private var remoteClient: RemoteControlClient? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,7 +100,7 @@ class GeckoActivity : ComponentActivity() {
                 // WeRead supports ArrowLeft/ArrowRight for prev/next.
                 // Give the page a moment to update URL/state before requesting backend render.
                 // (Avoid coordinate-based actions; this is semantic key navigation.)
-                delay(800)  // 缩短等待，提升响应
+                delay(200)  // 缩短等待，提升响应
                 val bmp = fetchRenderedImage(currentUrl)
                 if (bmp == null) {
                     lastStatus = "翻页后未获取到图片，请检查后端服务/网络"
@@ -123,6 +124,13 @@ class GeckoActivity : ComponentActivity() {
                 onDispose { session?.progressDelegate = null }
             }
 
+            DisposableEffect(Unit) {
+                onDispose {
+                    remoteClient?.disconnect()
+                    remoteClient = null
+                }
+            }
+
             Box(modifier = Modifier.fillMaxSize()) {
                 AndroidView(
                     modifier = Modifier
@@ -141,6 +149,48 @@ class GeckoActivity : ComponentActivity() {
                     Button(
                         onClick = {
                             isEbookMode = true
+                            // Connect remote control
+                            val serverUrl = RemoteControlClient.getServerUrl(true)
+                            remoteClient = RemoteControlClient(
+                                RemoteControlClient.DEFAULT_DEVICE_ID,
+                                serverUrl
+                            ) { action ->
+                                scope.launch {
+                                    when (action) {
+                                        "prev" -> {
+                                            remoteClient?.sendStatus("busy", "prev")
+                                            isLoading = true
+                                            arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)
+                                            renderedImage?.let { remoteClient?.sendImage(it) }
+                                            remoteClient?.sendStatus("ok", "prev done")
+                                            isLoading = false
+                                        }
+                                        "next" -> {
+                                            remoteClient?.sendStatus("busy", "next")
+                                            isLoading = true
+                                            arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)
+                                            renderedImage?.let { remoteClient?.sendImage(it) }
+                                            remoteClient?.sendStatus("ok", "next done")
+                                            isLoading = false
+                                        }
+                                        "capture" -> {
+                                            remoteClient?.sendStatus("busy", "capture")
+                                            isLoading = true
+                                            val bmp = fetchRenderedImage(currentUrl)
+                                            if (bmp != null) {
+                                                renderedImage = bmp
+                                                remoteClient?.sendImage(bmp)
+                                                remoteClient?.sendStatus("ok", "capture done")
+                                            } else {
+                                                remoteClient?.sendStatus("failed", "capture null")
+                                            }
+                                            isLoading = false
+                                        }
+                                    }
+                                }
+                            }
+                            remoteClient?.connect()
+                            Log.d("GeckoActivity", "Remote connected: $serverUrl")
                             scope.launch {
                                 isLoading = true
                                 val bmp = fetchRenderedImage(currentUrl)
@@ -200,21 +250,6 @@ class GeckoActivity : ComponentActivity() {
                                     }
                                 }) {
                                     Text("上一页")
-                                }
-                                Button(onClick = {
-                                    // 触发后台无头渲染服务（需要悬浮窗权限）
-                                    if (!hasOverlayPermission()) {
-                                        lastStatus = "请先授予悬浮窗权限"
-                                        requestOverlayPermission()
-                                    } else {
-                                        val intent = Intent(this@GeckoActivity, HeadlessRenderService::class.java).apply {
-                                            action = HeadlessRenderService.ACTION_RENDER
-                                            putExtra(HeadlessRenderService.EXTRA_URL, currentUrl)
-                                        }
-                                        startService(intent)
-                                    }
-                                }) {
-                                    Text("后台截屏")
                                 }
                                 Button(onClick = { isEbookMode = false }) {
                                     Text("退出")

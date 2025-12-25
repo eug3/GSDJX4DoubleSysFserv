@@ -124,7 +124,7 @@ class HeadlessRenderService : Service() {
         }
         s.loadUri(url)
         // wait for load
-        kotlinx.coroutines.delay(1000)
+        kotlinx.coroutines.delay(400)
         val display = s.acquireDisplay()
         return capturePixels(display)
     }
