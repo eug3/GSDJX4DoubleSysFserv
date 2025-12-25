@@ -99,7 +99,7 @@ class GeckoActivity : ComponentActivity() {
                 // WeRead supports ArrowLeft/ArrowRight for prev/next.
                 // Give the page a moment to update URL/state before requesting backend render.
                 // (Avoid coordinate-based actions; this is semantic key navigation.)
-                delay(1500)  // 增加等待时间让翻页动画和内容渲染完成
+                delay(800)  // 缩短等待，提升响应
                 val bmp = fetchRenderedImage(currentUrl)
                 if (bmp == null) {
                     lastStatus = "翻页后未获取到图片，请检查后端服务/网络"
@@ -199,6 +199,8 @@ class GeckoActivity : ComponentActivity() {
                                         isLoading = false
                                     }
                                 }) {
+                                    Text("上一页")
+                                }
                                 Button(onClick = {
                                     // 触发后台无头渲染服务（需要悬浮窗权限）
                                     if (!hasOverlayPermission()) {
@@ -213,8 +215,6 @@ class GeckoActivity : ComponentActivity() {
                                     }
                                 }) {
                                     Text("后台截屏")
-                                }
-                                    Text("上一页")
                                 }
                                 Button(onClick = { isEbookMode = false }) {
                                     Text("退出")
@@ -304,7 +304,7 @@ class GeckoActivity : ComponentActivity() {
             return@withContext null
         }
         // 等待页面渲染完成（视口变化后需要更多时间）
-        delay(500)
+        delay(300)
         // 优先用 GeckoView.capturePixels 获取 Surface 内容；失败再降级为 view.draw（可能为空白）
         val fromPixels = capturePixelsSuspend(view)
         if (fromPixels != null) {
