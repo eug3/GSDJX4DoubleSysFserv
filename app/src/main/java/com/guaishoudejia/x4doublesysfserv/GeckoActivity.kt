@@ -1,7 +1,9 @@
 package com.guaishoudejia.x4doublesysfserv
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -11,9 +13,11 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Build
 import android.util.Log
+import android.os.PowerManager
 import android.view.KeyEvent
 import android.net.Uri
 import android.provider.Settings
+import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
@@ -40,6 +44,7 @@ import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import kotlin.coroutines.resume
 import kotlin.math.pow
@@ -53,7 +58,7 @@ class GeckoActivity : ComponentActivity() {
     private val backendUrl = "http://10.0.2.2:18080" // Emulator: 10.0.2.2; Real device: replace with PC LAN IP
     private val backendEnabled = false // 关闭远端，使用本地 GeckoView 抓帧
     private var geckoView: GeckoView? = null
-    private var remoteClient: RemoteControlClient? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -126,8 +131,7 @@ class GeckoActivity : ComponentActivity() {
 
             DisposableEffect(Unit) {
                 onDispose {
-                    remoteClient?.disconnect()
-                    remoteClient = null
+                    releaseWakeLock()
                 }
             }
 
@@ -149,48 +153,12 @@ class GeckoActivity : ComponentActivity() {
                     Button(
                         onClick = {
                             isEbookMode = true
-                            // Connect remote control
-                            val serverUrl = RemoteControlClient.getServerUrl(true)
-                            remoteClient = RemoteControlClient(
-                                RemoteControlClient.DEFAULT_DEVICE_ID,
-                                serverUrl
-                            ) { action ->
-                                scope.launch {
-                                    when (action) {
-                                        "prev" -> {
-                                            remoteClient?.sendStatus("busy", "prev")
-                                            isLoading = true
-                                            arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)
-                                            renderedImage?.let { remoteClient?.sendImage(it) }
-                                            remoteClient?.sendStatus("ok", "prev done")
-                                            isLoading = false
-                                        }
-                                        "next" -> {
-                                            remoteClient?.sendStatus("busy", "next")
-                                            isLoading = true
-                                            arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)
-                                            renderedImage?.let { remoteClient?.sendImage(it) }
-                                            remoteClient?.sendStatus("ok", "next done")
-                                            isLoading = false
-                                        }
-                                        "capture" -> {
-                                            remoteClient?.sendStatus("busy", "capture")
-                                            isLoading = true
-                                            val bmp = fetchRenderedImage(currentUrl)
-                                            if (bmp != null) {
-                                                renderedImage = bmp
-                                                remoteClient?.sendImage(bmp)
-                                                remoteClient?.sendStatus("ok", "capture done")
-                                            } else {
-                                                remoteClient?.sendStatus("failed", "capture null")
-                                            }
-                                            isLoading = false
-                                        }
-                                    }
-                                }
-                            }
-                            remoteClient?.connect()
-                            Log.d("GeckoActivity", "Remote connected: $serverUrl")
+                            RemoteControlService.start(
+                                this@GeckoActivity,
+                                RemoteControlClient.EMULATOR_HOST,
+                                RemoteControlClient.DEFAULT_DEVICE_ID
+                            )
+                            acquireWakeLock()
                             scope.launch {
                                 isLoading = true
                                 val bmp = fetchRenderedImage(currentUrl)
@@ -200,6 +168,7 @@ class GeckoActivity : ComponentActivity() {
                                     lastStatus = ""
                                 }
                                 renderedImage = bmp
+                                bmp?.let { RemoteControlService.sendImage(this@GeckoActivity, bitmapToBase64(it)) }
                                 isLoading = false
                             }
                         },
@@ -213,6 +182,54 @@ class GeckoActivity : ComponentActivity() {
 
                 // E-book Mode Overlay
                 if (isEbookMode) {
+                    DisposableEffect(isEbookMode) {
+                        if (!isEbookMode) return@DisposableEffect onDispose { }
+                        val receiver = object : BroadcastReceiver() {
+                            override fun onReceive(context: Context?, intent: Intent?) {
+                                if (intent?.action != RemoteControlService.ACTION_COMMAND) return
+                                when (intent.getStringExtra(RemoteControlService.EXTRA_ACTION)) {
+                                    "prev" -> scope.launch {
+                                        RemoteControlService.sendStatus(this@GeckoActivity, "busy", "prev")
+                                        isLoading = true
+                                        arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)
+                                        renderedImage?.let { bmp ->
+                                            RemoteControlService.sendImage(this@GeckoActivity, bitmapToBase64(bmp))
+                                        }
+                                        RemoteControlService.sendStatus(this@GeckoActivity, "ok", "prev done")
+                                        isLoading = false
+                                    }
+                                    "next" -> scope.launch {
+                                        RemoteControlService.sendStatus(this@GeckoActivity, "busy", "next")
+                                        isLoading = true
+                                        arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)
+                                        renderedImage?.let { bmp ->
+                                            RemoteControlService.sendImage(this@GeckoActivity, bitmapToBase64(bmp))
+                                        }
+                                        RemoteControlService.sendStatus(this@GeckoActivity, "ok", "next done")
+                                        isLoading = false
+                                    }
+                                    "capture" -> scope.launch {
+                                        RemoteControlService.sendStatus(this@GeckoActivity, "busy", "capture")
+                                        isLoading = true
+                                        val bmp = fetchRenderedImage(currentUrl)
+                                        if (bmp != null) {
+                                            renderedImage = bmp
+                                            lastStatus = ""
+                                            RemoteControlService.sendImage(this@GeckoActivity, bitmapToBase64(bmp))
+                                            RemoteControlService.sendStatus(this@GeckoActivity, "ok", "capture done")
+                                        } else {
+                                            lastStatus = "重试仍未获取到图片"
+                                            RemoteControlService.sendStatus(this@GeckoActivity, "failed", "capture null")
+                                        }
+                                        isLoading = false
+                                    }
+                                }
+                            }
+                        }
+                        val filter = IntentFilter(RemoteControlService.ACTION_COMMAND)
+                        registerReceiver(receiver, filter)
+                        onDispose { unregisterReceiver(receiver) }
+                    }
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -251,7 +268,11 @@ class GeckoActivity : ComponentActivity() {
                                 }) {
                                     Text("上一页")
                                 }
-                                Button(onClick = { isEbookMode = false }) {
+                                Button(onClick = {
+                                    isEbookMode = false
+                                    RemoteControlService.stop(this@GeckoActivity)
+                                    releaseWakeLock()
+                                }) {
                                     Text("退出")
                                 }
                                 Button(onClick = {
@@ -465,6 +486,7 @@ class GeckoActivity : ComponentActivity() {
 
     override fun onStop() {
         session?.setActive(false)
+        releaseWakeLock()
         super.onStop()
     }
 
@@ -475,7 +497,33 @@ class GeckoActivity : ComponentActivity() {
         } catch (e: Exception) {
             Log.w("Gecko", "Error shutting down", e)
         }
+        RemoteControlService.stop(this)
+        releaseWakeLock()
         super.onDestroy()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "x4:remoteControl").apply {
+            setReferenceCounted(false)
+            try { acquire(30 * 60 * 1000L) } catch (_: Exception) {}
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (_: Exception) {
+        } finally {
+            wakeLock = null
+        }
+    }
+
+    private fun bitmapToBase64(bitmap: Bitmap): String {
+        val baos = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos)
+        return Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
     }
 
     companion object {

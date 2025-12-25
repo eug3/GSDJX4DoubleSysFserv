@@ -3,6 +3,8 @@ package com.guaishoudejia.x4doublesysfserv
 import android.graphics.Bitmap
 import android.util.Base64
 import android.util.Log
+import android.os.Handler
+import android.os.Looper
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -22,11 +24,15 @@ class RemoteControlClient(
     private val onCommand: (action: String) -> Unit
 ) {
     private var webSocket: WebSocket? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private var shouldReconnect = false
+    private var reconnectDelayMs = 5_000L
     private val client = OkHttpClient.Builder()
-        .pingInterval(30, TimeUnit.SECONDS)
+        .pingInterval(15, TimeUnit.SECONDS)
         .build()
 
     fun connect() {
+        shouldReconnect = true
         val url = "$serverUrl/ws?role=device&id=$deviceId"
         val request = Request.Builder().url(url).build()
         
@@ -34,6 +40,7 @@ class RemoteControlClient(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d("RemoteControl", "WebSocket connected")
                 sendStatus("connected", "device ready")
+                reconnectDelayMs = 5_000L
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -56,10 +63,12 @@ class RemoteControlClient(
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.d("RemoteControl", "WebSocket closed")
+                if (shouldReconnect) scheduleReconnect()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e("RemoteControl", "WebSocket error", t)
+                if (shouldReconnect) scheduleReconnect()
             }
         })
     }
@@ -67,6 +76,19 @@ class RemoteControlClient(
     fun disconnect() {
         webSocket?.close(1000, "client disconnect")
         webSocket = null
+        shouldReconnect = false
+        handler.removeCallbacksAndMessages(null)
+    }
+
+    private fun scheduleReconnect() {
+        handler.removeCallbacksAndMessages(null)
+        handler.postDelayed({
+            if (shouldReconnect) {
+                Log.d("RemoteControl", "Reconnecting WS...")
+                connect()
+                reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(60_000L)
+            }
+        }, reconnectDelayMs)
     }
 
     fun sendStatus(status: String, detail: String = "") {
@@ -77,6 +99,10 @@ class RemoteControlClient(
             if (detail.isNotEmpty()) put("detail", detail)
         }
         webSocket?.send(json.toString())
+    }
+
+    fun rawSend(payload: String) {
+        webSocket?.send(payload)
     }
 
     fun sendImage(bitmap: Bitmap) {
