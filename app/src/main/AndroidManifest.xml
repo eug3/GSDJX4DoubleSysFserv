@@ -3,6 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" tools:ignore="ProtectedPermissions" />
 
     <application
         android:allowBackup="true"
@@ -30,6 +32,11 @@
             android:exported="false"
             android:label="GeckoView"
             android:theme="@style/Theme.GSDJX4DoubleSysFserv" />
+
+        <service
+            android:name=".HeadlessRenderService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>
