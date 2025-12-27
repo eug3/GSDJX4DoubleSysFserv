@@ -97,20 +97,21 @@ class HeadlessRenderService : Service() {
 
     private fun attachDummyWindow(w: Int, h: Int) {
         val view = android.view.View(this)
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val windowType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
             WindowManager.LayoutParams.TYPE_PHONE
         }
-        val params = WindowManager.LayoutParams(
-            w,
-            h,
-            type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            android.graphics.PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.START or Gravity.TOP }
+        val params = WindowManager.LayoutParams().apply {
+            width = w
+            height = h
+            type = windowType
+            flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            format = android.graphics.PixelFormat.TRANSLUCENT
+            gravity = Gravity.START or Gravity.TOP
+        }
         windowManager?.addView(view, params)
     }
 
@@ -126,14 +127,16 @@ class HeadlessRenderService : Service() {
         // wait for load
         kotlinx.coroutines.delay(400)
         val display = s.acquireDisplay()
-        return capturePixels(display)
+        val bmp = capturePixels(display)
+        s.releaseDisplay(display)
+        return bmp
     }
 
     private suspend fun capturePixels(display: org.mozilla.geckoview.GeckoDisplay): Bitmap? = suspendCancellableCoroutine { cont ->
         try {
-            display.capturePixels().accept({ bmp: Bitmap? ->
-                if (!cont.isCompleted) cont.resume(bmp)
-            }, { err: Throwable? ->
+            display.capturePixels().accept({
+                if (!cont.isCompleted) cont.resume(it)
+            }, { err ->
                 Log.w("HeadlessRender", "capturePixels failed", err)
                 if (!cont.isCompleted) cont.resume(null)
             })
