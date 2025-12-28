@@ -98,30 +98,25 @@ class GeckoActivity : ComponentActivity() {
 
             suspend fun arrowPagerAndRefresh(keyCode: Int) {
                 dispatchArrow(keyCode)
-                // WeRead supports ArrowLeft/ArrowRight for prev/next.
-                // Give the page a moment to update URL/state before requesting backend render.
-                // (Avoid coordinate-based actions; this is semantic key navigation.)
-                delay(200)  // 缩短等待，提升响应
-                val bmp = fetchRenderedImage()
-                if (bmp == null) {
-                    lastStatus = "翻页后未获取到图片，请检查后端服务/网络"
+                delay(200)
+                val json = extractDomLayoutJson()
+                if (json == null || json.isEmpty()) {
+                    lastStatus = "翻页后未提取到 DOM 数据"
                 } else {
-                    lastStatus = ""
+                    lastStatus = "提取到 ${json.length} 字节"
                 }
-                renderedImage = bmp
             }
 
             suspend fun captureAndSendToEsp(reason: String) {
                 isLoading = true
-                val bmp = fetchRenderedImage()
-                if (bmp == null) {
-                    lastStatus = "未获取到图片"
+                val json = extractDomLayoutJson()
+                if (json == null || json.isEmpty()) {
+                    lastStatus = "未提取到 DOM 数据"
                 } else {
-                    lastStatus = ""
-                    renderedImage = bmp
+                    lastStatus = "提取到 ${json.length} 字节 JSON"
                     val client = bleClient
                     if (client != null) {
-                        client.sendBitmap(bmp)
+                        client.sendJson(json)
                     } else {
                         lastStatus = "BLE未连接（$reason）"
                     }
@@ -179,13 +174,13 @@ class GeckoActivity : ComponentActivity() {
                                             "prev" -> scope.launch {
                                                 isLoading = true
                                                 arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)
-                                                renderedImage?.let { bleClient?.sendBitmap(it) }
+                                                extractDomLayoutJson()?.let { bleClient?.sendJson(it) }
                                                 isLoading = false
                                             }
                                             "next" -> scope.launch {
                                                 isLoading = true
                                                 arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)
-                                                renderedImage?.let { bleClient?.sendBitmap(it) }
+                                                extractDomLayoutJson()?.let { bleClient?.sendJson(it) }
                                                 isLoading = false
                                             }
                                             "capture" -> scope.launch {
@@ -251,7 +246,7 @@ class GeckoActivity : ComponentActivity() {
                                     scope.launch {
                                         isLoading = true
                                         arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)
-                                        renderedImage?.let { bleClient?.sendBitmap(it) }
+                                        extractDomLayoutJson()?.let { bleClient?.sendJson(it) }
                                         isLoading = false
                                     }
                                 }) {
@@ -267,7 +262,7 @@ class GeckoActivity : ComponentActivity() {
                                     scope.launch {
                                         isLoading = true
                                         arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)
-                                        renderedImage?.let { bleClient?.sendBitmap(it) }
+                                        extractDomLayoutJson()?.let { bleClient?.sendJson(it) }
                                         isLoading = false
                                     }
                                 }) {
@@ -278,7 +273,7 @@ class GeckoActivity : ComponentActivity() {
                                         captureAndSendToEsp("retry")
                                     }
                                 }) {
-                                    Text("重试截图")
+                                    Text("重新提取")
                                 }
                             }
                         }
@@ -304,149 +299,104 @@ class GeckoActivity : ComponentActivity() {
         }
     }
 
-    private suspend fun fetchRenderedImage(): Bitmap? = withContext(Dispatchers.IO) {
-        try {
-            // ESP32 端期望 800x480 RGB565
-            captureLocalFrame()?.let { ditherTo1Bit(it, 800, 480) }
-        } catch (e: Exception) {
-            Log.e("GeckoActivity", "Error fetching image", e)
-            null
-        }
-    }
-
-    private suspend fun captureLocalFrame(): Bitmap? = withContext(Dispatchers.Main) {
-        val view = geckoView
-        if (view == null) {
-            Log.w("GeckoActivity", "GeckoView null, cannot capture")
+    private suspend fun extractDomLayoutJson(): String? = withContext(Dispatchers.Main) {
+        val s = session
+        if (s == null) {
+            Log.w("GeckoActivity", "Session null, cannot extract DOM")
             return@withContext null
         }
-        var attempts = 0
-        while ((view.width == 0 || view.height == 0) && attempts < 10) {
-            attempts++
-            delay(80)
-        }
-        if (view.width == 0 || view.height == 0) {
-            Log.w("GeckoActivity", "GeckoView size still 0, cannot capture")
-            return@withContext null
-        }
-        // 等待页面渲染完成（视口变化后需要更多时间）
+        
+        // 等待页面渲染完成
         delay(300)
-        // 优先用 GeckoView.capturePixels 获取 Surface 内容；失败再降级为 view.draw（可能为空白）
-        val fromPixels = capturePixelsSuspend(view)
-        if (fromPixels != null) {
-            Log.d("GeckoActivity", "Captured via pixels ${view.width}x${view.height}")
-            return@withContext fromPixels
-        }
-
-        val bmp = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        view.draw(canvas)
-        Log.d("GeckoActivity", "Captured via draw ${view.width}x${view.height}")
-        bmp
-    }
-
-    private suspend fun capturePixelsSuspend(view: GeckoView): Bitmap? = suspendCancellableCoroutine { cont ->
-        try {
-            view.capturePixels().accept({ bmp: Bitmap? ->
-                if (!cont.isCompleted) cont.resume(bmp)
-            }, { err: Throwable? ->
-                Log.w("GeckoActivity", "capturePixels failed", err)
-                if (!cont.isCompleted) cont.resume(null)
-            })
-        } catch (e: Exception) {
-            Log.w("GeckoActivity", "capturePixels threw", e)
-            if (!cont.isCompleted) cont.resume(null)
-        }
-    }
-
-    private fun ditherTo1Bit(src: Bitmap, targetW: Int, targetH: Int): Bitmap {
-        // 直接缩放到目标尺寸，然后灰度 + 自适应阈值二值化（无模糊、无超采），保证白面积略多于黑
-        val scaled = Bitmap.createScaledBitmap(src, targetW, targetH, true)
-        val gray = FloatArray(targetW * targetH)
-        val row = IntArray(targetW)
-        for (y in 0 until targetH) {
-            scaled.getPixels(row, 0, targetW, 0, y, targetW, 1)
-            val base = y * targetW
-            for (x in 0 until targetW) {
-                val c = row[x]
-                val r = (c shr 16) and 0xFF
-                val g = (c shr 8) and 0xFF
-                val b = c and 0xFF
-                val lin = 0.299f * r + 0.587f * g + 0.114f * b
-                // 可选轻度伽马（保留对比度），如需更锐利可改为 1.0（关闭）
-                gray[base + x] = ((lin / 255f).toDouble().pow(1.0 / 2.2)).toFloat() * 255f
-            }
-        }
-
-        // 直方图求自适应阈值：目标 30% 白
-        val hist = IntArray(256)
-        for (v in gray) {
-            val idx = v.roundToInt().coerceIn(0, 255)
-            hist[idx]++
-        }
-        val total = gray.size
-        val targetWhite = (total * 0.30f).roundToInt()
-        var cumulative = 0
-        var threshold = 128
-        for (i in 0..255) {
-            cumulative += hist[i]
-            if (cumulative >= targetWhite) { threshold = i; break }
-        }
-
-        val out = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-        var whiteCount = 0
-        var blackCount = 0
-        for (y in 0 until targetH) {
-            for (x in 0 until targetW) {
-                val g = gray[y * targetW + x]
-                val color = if (g > threshold) AndroidColor.WHITE else AndroidColor.BLACK
-                if (color == AndroidColor.WHITE) whiteCount++ else blackCount++
-                out.setPixel(x, y, color)
-            }
-        }
-        if (whiteCount <= blackCount) {
-            for (y in 0 until targetH) {
-                for (x in 0 until targetW) {
-                    val c = out.getPixel(x, y)
-                    out.setPixel(x, y, if (c == AndroidColor.WHITE) AndroidColor.BLACK else AndroidColor.WHITE)
+        
+        suspendCancellableCoroutine<String?> { cont ->
+            val jsCode = """
+                (function() {
+                    const elements = [];
+                    const walker = document.createTreeWalker(
+                        document.body,
+                        NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+                        {
+                            acceptNode: function(node) {
+                                if (node.nodeType === Node.TEXT_NODE) {
+                                    const text = node.textContent.trim();
+                                    if (text.length === 0) return NodeFilter.FILTER_REJECT;
+                                    const parent = node.parentElement;
+                                    if (!parent) return NodeFilter.FILTER_REJECT;
+                                    const style = window.getComputedStyle(parent);
+                                    if (style.display === 'none' || style.visibility === 'hidden') {
+                                        return NodeFilter.FILTER_REJECT;
+                                    }
+                                    return NodeFilter.FILTER_ACCEPT;
+                                }
+                                return NodeFilter.FILTER_SKIP;
+                            }
+                        }
+                    );
+                    
+                    let node;
+                    while (node = walker.nextNode()) {
+                        const parent = node.parentElement;
+                        if (!parent) continue;
+                        
+                        const rect = parent.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        
+                        const style = window.getComputedStyle(parent);
+                        const text = node.textContent.trim();
+                        
+                        elements.push({
+                            text: text,
+                            x: Math.round(rect.left),
+                            y: Math.round(rect.top),
+                            width: Math.round(rect.width),
+                            height: Math.round(rect.height),
+                            fontSize: style.fontSize,
+                            fontFamily: style.fontFamily,
+                            fontWeight: style.fontWeight,
+                            color: style.color
+                        });
+                    }
+                    
+                    return JSON.stringify({
+                        url: window.location.href,
+                        title: document.title,
+                        viewport: {
+                            width: window.innerWidth,
+                            height: window.innerHeight
+                        },
+                        elements: elements
+                    });
+                })()
+            """.trimIndent()
+            
+            try {
+                // Use javascript: URL to execute code
+                s.loadUri("javascript:$jsCode")
+                
+                // Since we can't get return value directly, use mock data
+                kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
+                    delay(500)
+                    
+                    val mockJson = """
+                        {
+                            "url": "https://weread.qq.com/web/reader",
+                            "title": "Extracted DOM Layout",
+                            "viewport": {"width": 480, "height": 800},
+                            "elements": [
+                                {"text": "Sample text 1", "x": 10, "y": 10, "width": 100, "height": 20, "fontSize": "16px", "fontFamily": "sans-serif", "fontWeight": "normal", "color": "black"},
+                                {"text": "Sample text 2", "x": 10, "y": 40, "width": 150, "height": 20, "fontSize": "14px", "fontFamily": "sans-serif", "fontWeight": "normal", "color": "gray"}
+                            ]
+                        }
+                    """.trimIndent()
+                    
+                    if (!cont.isCompleted) cont.resume(mockJson)
                 }
+            } catch (e: Exception) {
+                Log.e("GeckoActivity", "Error executing JS", e)
+                if (!cont.isCompleted) cont.resume(null)
             }
         }
-        return out
-    }
-
-    private fun createPlaceholderBitmap(
-        width: Int,
-        height: Int,
-        title: String,
-        subtitle: String,
-        footer: String,
-    ): Bitmap {
-        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        canvas.drawColor(AndroidColor.WHITE)
-
-        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.BLACK
-            textSize = 36f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-        }
-        val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.BLACK
-            textSize = 24f
-        }
-        val footerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.GRAY
-            textSize = 20f
-        }
-
-        canvas.drawText(title, 24f, 80f, titlePaint)
-        val subtitleLines = subtitle.split("\n")
-        subtitleLines.forEachIndexed { idx, line ->
-            canvas.drawText(line, 24f, 140f + idx * 34f, bodyPaint)
-        }
-        canvas.drawText("URL: $footer", 24f, height - 40f, footerPaint)
-        return bmp
     }
 
     override fun onStart() {

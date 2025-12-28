@@ -111,6 +111,26 @@
 			],
 			"isBackground": false,
 			"group": "build"
+		},
+		{
+			"label": "gradle: assembleDebug",
+			"type": "shell",
+			"command": "./gradlew",
+			"args": [
+				":app:assembleDebug"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "gradle: assembleDebug",
+			"type": "shell",
+			"command": "./gradlew",
+			"args": [
+				":app:assembleDebug"
+			],
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }
