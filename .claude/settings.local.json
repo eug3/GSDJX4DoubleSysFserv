@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m esptool:*)",
+      "Bash(python3:*)",
+      "Bash(powershell.exe:*)",
+      "Bash(mpremote connect:*)",
+      "Bash(python:*)",
+      "Bash(C:\\\\Python312\\\\python.exe:*)",
+      "Bash(\"C:\\\\Espressif\\\\python_env\\\\idf5.5_py3.11_env\\\\Scripts\\\\python.exe\" -m mpremote connect COM5 exec \"d:\\\\GitHub\\\\GSDJX4DoubleSysFserv\\\\spi_test_from_ida.py\")",
+      "Bash(\"C:\\\\Espressif\\\\python_env\\\\idf5.5_py3.11_env\\\\Scripts\\\\python.exe\":*)",
+      "Bash(\"C:\\\\Espressif\\\\python_env\\\\idf5.5_py3.11_env\\\\Scripts\\\\python.exe\" -m mpremote connect:*)",
+      "Bash(Test:*)"
+    ]
+  }
+}

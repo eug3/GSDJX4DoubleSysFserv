@@ -4,7 +4,7 @@
 			"path": "."
 		},
 		{
-			"path": "../../Github/esp32c3x4/c3x4_main_control"
+			"path": "../esp32c3x4/c3x4_main_control"
 		}
 	],
 	"settings": {
