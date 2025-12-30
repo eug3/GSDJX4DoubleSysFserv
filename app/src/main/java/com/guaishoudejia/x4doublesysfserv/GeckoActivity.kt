@@ -19,6 +19,8 @@ import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
@@ -40,6 +42,7 @@ import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
+import org.mozilla.geckoview.GeckoResult
 import kotlin.coroutines.resume
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -75,7 +78,7 @@ class GeckoActivity : ComponentActivity() {
         setContent {
             var currentUrl by remember { mutableStateOf(targetUrl) }
             var isEbookMode by remember { mutableStateOf(false) }
-            var renderedImage by remember { mutableStateOf<Bitmap?>(null) }
+            var jsonText by remember { mutableStateOf("") }
             var isLoading by remember { mutableStateOf(false) }
             var lastStatus by remember { mutableStateOf("") }
             val scope = rememberCoroutineScope()
@@ -96,7 +99,7 @@ class GeckoActivity : ComponentActivity() {
                 view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
             }
 
-            suspend fun arrowPagerAndRefresh(keyCode: Int) {
+            suspend fun arrowPagerAndRefresh(keyCode: Int): String? {
                 dispatchArrow(keyCode)
                 delay(200)
                 val json = extractDomLayoutJson()
@@ -104,7 +107,9 @@ class GeckoActivity : ComponentActivity() {
                     lastStatus = "翻页后未提取到 DOM 数据"
                 } else {
                     lastStatus = "提取到 ${json.length} 字节"
+                    jsonText = json
                 }
+                return json  // 返回提取的 JSON，避免重复提取
             }
 
             suspend fun captureAndSendToEsp(reason: String) {
@@ -114,6 +119,7 @@ class GeckoActivity : ComponentActivity() {
                     lastStatus = "未提取到 DOM 数据"
                 } else {
                     lastStatus = "提取到 ${json.length} 字节 JSON"
+                    jsonText = json
                     val client = bleClient
                     if (client != null) {
                         client.sendJson(json)
@@ -173,14 +179,16 @@ class GeckoActivity : ComponentActivity() {
                                         when (cmd) {
                                             "prev" -> scope.launch {
                                                 isLoading = true
-                                                arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)
-                                                extractDomLayoutJson()?.let { bleClient?.sendJson(it) }
+                                                arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)?.let { json ->
+                                                    bleClient?.sendJson(json)
+                                                }
                                                 isLoading = false
                                             }
                                             "next" -> scope.launch {
                                                 isLoading = true
-                                                arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)
-                                                extractDomLayoutJson()?.let { bleClient?.sendJson(it) }
+                                                arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)?.let { json ->
+                                                    bleClient?.sendJson(json)
+                                                }
                                                 isLoading = false
                                             }
                                             "capture" -> scope.launch {
@@ -221,16 +229,19 @@ class GeckoActivity : ComponentActivity() {
                         if (isLoading) {
                             CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                         } else {
-                            renderedImage?.let {
-                                Image(
-                                    bitmap = it.asImageBitmap(),
-                                    contentDescription = "Rendered Page",
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            } ?: run {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(16.dp)
+                                    .verticalScroll(rememberScrollState())
+                            ) {
                                 Text(
-                                    text = lastStatus.ifBlank { "未收到后端位图，保持白板" },
-                                    modifier = Modifier.align(Alignment.Center),
+                                    text = "JSON 页面内容：",
+                                    color = Color.Black
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = if (jsonText.isNotBlank()) jsonText else lastStatus.ifBlank { "暂无 JSON 内容" },
                                     color = Color.Black
                                 )
                             }
@@ -245,8 +256,9 @@ class GeckoActivity : ComponentActivity() {
                                 Button(onClick = {
                                     scope.launch {
                                         isLoading = true
-                                        arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)
-                                        extractDomLayoutJson()?.let { bleClient?.sendJson(it) }
+                                        arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)?.let { json ->
+                                            bleClient?.sendJson(json)
+                                        }
                                         isLoading = false
                                     }
                                 }) {
@@ -261,8 +273,9 @@ class GeckoActivity : ComponentActivity() {
                                 Button(onClick = {
                                     scope.launch {
                                         isLoading = true
-                                        arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)
-                                        extractDomLayoutJson()?.let { bleClient?.sendJson(it) }
+                                        arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)?.let { json ->
+                                            bleClient?.sendJson(json)
+                                        }
                                         isLoading = false
                                     }
                                 }) {
@@ -305,96 +318,69 @@ class GeckoActivity : ComponentActivity() {
             Log.w("GeckoActivity", "Session null, cannot extract DOM")
             return@withContext null
         }
-        
+
         // 等待页面渲染完成
         delay(300)
-        
+
         suspendCancellableCoroutine<String?> { cont ->
-            val jsCode = """
-                (function() {
-                    const elements = [];
-                    const walker = document.createTreeWalker(
-                        document.body,
-                        NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-                        {
-                            acceptNode: function(node) {
-                                if (node.nodeType === Node.TEXT_NODE) {
-                                    const text = node.textContent.trim();
-                                    if (text.length === 0) return NodeFilter.FILTER_REJECT;
-                                    const parent = node.parentElement;
-                                    if (!parent) return NodeFilter.FILTER_REJECT;
-                                    const style = window.getComputedStyle(parent);
-                                    if (style.display === 'none' || style.visibility === 'hidden') {
-                                        return NodeFilter.FILTER_REJECT;
-                                    }
-                                    return NodeFilter.FILTER_ACCEPT;
-                                }
-                                return NodeFilter.FILTER_SKIP;
-                            }
+            // 临时进度代理：利用标题变更回传 JSON
+            val prevProgress = s.progressDelegate
+            val delegate = object : GeckoSession.ProgressDelegate {
+                override fun onPageStart(session: GeckoSession, url: String) {
+                    if (url.startsWith("x4json://")) {
+                        try {
+                            val encoded = url.removePrefix("x4json://")
+                            val json = java.net.URLDecoder.decode(encoded, "UTF-8")
+                            if (!cont.isCompleted) cont.resume(json)
+                        } catch (e: Exception) {
+                            Log.w("GeckoActivity", "decode x4json url failed", e)
+                            if (!cont.isCompleted) cont.resume(null)
+                        } finally {
+                            s.progressDelegate = prevProgress
                         }
-                    );
-                    
-                    let node;
-                    while (node = walker.nextNode()) {
-                        const parent = node.parentElement;
-                        if (!parent) continue;
-                        
-                        const rect = parent.getBoundingClientRect();
-                        if (rect.width === 0 || rect.height === 0) continue;
-                        
-                        const style = window.getComputedStyle(parent);
-                        const text = node.textContent.trim();
-                        
-                        elements.push({
-                            text: text,
-                            x: Math.round(rect.left),
-                            y: Math.round(rect.top),
-                            width: Math.round(rect.width),
-                            height: Math.round(rect.height),
-                            fontSize: style.fontSize,
-                            fontFamily: style.fontFamily,
-                            fontWeight: style.fontWeight,
-                            color: style.color
-                        });
                     }
-                    
-                    return JSON.stringify({
-                        url: window.location.href,
-                        title: document.title,
-                        viewport: {
-                            width: window.innerWidth,
-                            height: window.innerHeight
-                        },
-                        elements: elements
-                    });
-                })()
-            """.trimIndent()
-            
-            try {
-                // Use javascript: URL to execute code
-                s.loadUri("javascript:$jsCode")
-                
-                // Since we can't get return value directly, use mock data
-                kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
-                    delay(500)
-                    
-                    val mockJson = """
-                        {
-                            "url": "https://weread.qq.com/web/reader",
-                            "title": "Extracted DOM Layout",
-                            "viewport": {"width": 480, "height": 800},
-                            "elements": [
-                                {"text": "Sample text 1", "x": 10, "y": 10, "width": 100, "height": 20, "fontSize": "16px", "fontFamily": "sans-serif", "fontWeight": "normal", "color": "black"},
-                                {"text": "Sample text 2", "x": 10, "y": 40, "width": 150, "height": 20, "fontSize": "14px", "fontFamily": "sans-serif", "fontWeight": "normal", "color": "gray"}
-                            ]
-                        }
-                    """.trimIndent()
-                    
-                    if (!cont.isCompleted) cont.resume(mockJson)
                 }
+                override fun onPageStop(session: GeckoSession, success: Boolean) {}
+            }
+            s.progressDelegate = delegate
+
+            val jsCode = (
+                "(function(){" +
+                "try {" +
+                " const elements=[];" +
+                " const walker=document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);" +
+                " let n;" +
+                " while(n=walker.nextNode()){" +
+                "   var t=n.textContent.trim(); if(!t) continue;" +
+                "   var p=n.parentElement; if(!p) continue;" +
+                "   var cs=getComputedStyle(p); if(cs.display==='none'||cs.visibility==='hidden') continue;" +
+                "   var r=p.getBoundingClientRect(); if(r.width===0||r.height===0) continue;" +
+                "   elements.push({text:t,x:Math.round(r.left),y:Math.round(r.top),width:Math.round(r.width),height:Math.round(r.height),fontSize:cs.fontSize,fontFamily:cs.fontFamily,fontWeight:cs.fontWeight,color:cs.color});" +
+                " }" +
+                " const payload={url:location.href,title:document.title,viewport:{width:innerWidth,height:innerHeight},elements:elements};" +
+                " const out=encodeURIComponent(JSON.stringify(payload));" +
+                " location.href='x4json://'+out;" +
+                "} catch(e){ location.href='x4json://'+encodeURIComponent(JSON.stringify({error:String(e)})); }" +
+                "})();"
+            )
+
+            try {
+                s.loadUri("javascript:" + jsCode)
             } catch (e: Exception) {
-                Log.e("GeckoActivity", "Error executing JS", e)
-                if (!cont.isCompleted) cont.resume(null)
+                Log.e("GeckoActivity", "exec js error", e)
+                if (!cont.isCompleted) {
+                    s.progressDelegate = prevProgress
+                    cont.resume(null)
+                }
+            }
+
+            // 超时保护，恢复 delegate
+            kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
+                delay(2000)
+                if (!cont.isCompleted) {
+                    s.progressDelegate = prevProgress
+                    cont.resume(null)
+                }
             }
         }
     }

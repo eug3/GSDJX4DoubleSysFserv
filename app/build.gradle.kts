@@ -39,6 +39,12 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        jniLibs {
+            // 与 AndroidManifest 的 extractNativeLibs 保持一致，确保 16KB 设备兼容
+            useLegacyPackaging = true
+        }
+    }
 }
 
 dependencies {

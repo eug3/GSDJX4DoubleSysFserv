@@ -188,8 +188,10 @@ class BleEspClient(
 
     private fun onPacketWritten(success: Boolean) {
         if (!success) {
-            Log.w(TAG, "Chunk write failed; aborting transfer")
+            Log.w(TAG, "Chunk write failed; aborting transfer and cleaning state")
             sending = false
+            pendingFrame = null
+            pendingOffset = 0
             return
         }
         if (pendingOffset >= (pendingFrame?.size ?: 0)) {

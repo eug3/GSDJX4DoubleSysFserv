@@ -52,6 +52,7 @@ class X4Service : Service() {
     private var pendingOffset = 0
     private var isSending = false
     private var currentMtu = 20
+    private var lastChunkSize = 0  // 记录上次实际发送的数据块大小
 
     private val bluetoothAdapter: BluetoothAdapter? by lazy { (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter }
 
@@ -98,7 +99,17 @@ class X4Service : Service() {
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                sendNextPacket()
+                // 只有写入成功后才更新偏移量，使用实际发送的 chunk 大小
+                pendingOffset = (pendingOffset + lastChunkSize).coerceAtMost(pendingFrame?.size ?: 0)
+                // 检查是否已发送完所有数据
+                if (pendingOffset >= (pendingFrame?.size ?: 0)) {
+                    Log.d(TAG, "Frame transfer completed")
+                    isSending = false
+                    pendingFrame = null
+                    pendingOffset = 0
+                } else {
+                    sendNextPacket()
+                }
             } else {
                 Log.e(TAG, "Characteristic write failed: $status")
                 isSending = false
@@ -160,7 +171,12 @@ class X4Service : Service() {
 
     private fun connectToDevice(device: BluetoothDevice) {
         Log.d(TAG, "Connecting to ${device.address}")
-        bluetoothGatt = device.connectGatt(this, false, gattCallback)
+        bluetoothGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            device.connectGatt(this, false, gattCallback, android.bluetooth.BluetoothDevice.TRANSPORT_LE)
+        } else {
+            @Suppress("DEPRECATION")
+            device.connectGatt(this, false, gattCallback)
+        }
     }
 
     private fun captureAndProcessImage() {
@@ -313,12 +329,26 @@ class X4Service : Service() {
         isSending = true
         val end = (pendingOffset + currentMtu).coerceAtMost(frame.size)
         val data = frame.copyOfRange(pendingOffset, end)
+        lastChunkSize = data.size  // 记录本次实际发送的数据块大小
         val characteristic = bluetoothGatt?.getService(SERVICE_UUID)?.getCharacteristic(CHARACTERISTIC_UUID_DATA)
         if (characteristic != null && data != null) {
-            characteristic.value = data
-            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            bluetoothGatt?.writeCharacteristic(characteristic)
-            pendingOffset = end
+            val success: Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val status = bluetoothGatt?.writeCharacteristic(characteristic, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+                status == android.bluetooth.BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    characteristic.value = data
+                    bluetoothGatt?.writeCharacteristic(characteristic)
+                    true
+                }
+            }
+            // 注意：pendingOffset 在 onCharacteristicWrite 回调成功后才更新
+            if (!success) {
+                Log.e(TAG, "writeCharacteristic failed immediately")
+                isSending = false
+            }
         } else {
             Log.e(TAG, "Characteristic or data is null, cannot send packet")
             isSending = false
@@ -354,7 +384,16 @@ class X4Service : Service() {
         mediaProjection?.stop()
         virtualDisplay?.release()
         imageReader?.close()
-        bluetoothGatt?.close()
+        // 先断开连接，再关闭 GATT
+        try {
+            bluetoothGatt?.disconnect()
+        } catch (_: Exception) {
+        }
+        try {
+            bluetoothGatt?.close()
+        } catch (_: Exception) {
+        }
+        bluetoothGatt = null
         Log.d(TAG, "Service destroyed, all resources released.")
     }
 
