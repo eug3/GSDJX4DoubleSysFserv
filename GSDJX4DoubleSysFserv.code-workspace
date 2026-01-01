@@ -8,6 +8,7 @@
 		}
 	],
 	"settings": {
-		"java.configuration.updateBuildConfiguration": "automatic"
+		"java.configuration.updateBuildConfiguration": "automatic",
+		"stm32cube-ide-clangd.path": "cube"
 	}
 }
