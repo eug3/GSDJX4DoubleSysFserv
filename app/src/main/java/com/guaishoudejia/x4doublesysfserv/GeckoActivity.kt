@@ -31,7 +31,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -214,80 +216,116 @@ class GeckoActivity : ComponentActivity() {
                     }
                 }
 
-                // E-book Mode Overlay
+                // 底部 JSON 面板（电子书阅读模式）
                 if (isEbookMode) {
                     DisposableEffect(isEbookMode) {
                         onDispose {
                             // Keep BLE client alive while activity lives; only close on activity destroy.
                         }
                     }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.White)
-                    ) {
-                        if (isLoading) {
-                            CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-                        } else {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(16.dp)
-                                    .verticalScroll(rememberScrollState())
-                            ) {
-                                Text(
-                                    text = "JSON 页面内容：",
-                                    color = Color.Black
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = if (jsonText.isNotBlank()) jsonText else lastStatus.ifBlank { "暂无 JSON 内容" },
-                                    color = Color.Black
-                                )
-                            }
 
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .align(Alignment.BottomCenter)
-                                    .padding(16.dp),
-                                horizontalArrangement = Arrangement.SpaceEvenly
-                            ) {
-                                Button(onClick = {
-                                    scope.launch {
-                                        isLoading = true
-                                        arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)?.let { json ->
-                                            bleClient?.sendJson(json)
+                    // 蓝牙连接状态提示
+                    val connectionStatus = when {
+                        bleClient == null -> "未连接"
+                        bleEspClient?.let { cl ->
+                            try {
+                                val f = cl::class.java.getField("isConnected")
+                                f.getBoolean(cl)
+                            } catch (_: Exception) {
+                                false
+                            }
+                        } -> "已连接"
+                        else -> "连接中..."
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .background(Color(0xFFF5F5F5))
+                    ) {
+                        // 顶部栏：状态 + 按钮
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "BLE: $connectionStatus",
+                                fontSize = 12.sp,
+                                color = if (connectionStatus == "已连接") Color(0xFF4CAF50) else Color.Gray
+                            )
+                            Row {
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            isLoading = true
+                                            arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)?.let { json ->
+                                                bleClient?.sendJson(json)
+                                            }
+                                            isLoading = false
                                         }
-                                        isLoading = false
-                                    }
-                                }) {
-                                    Text("上一页")
+                                    },
+                                    modifier = Modifier.padding(end = 4.dp)
+                                ) {
+                                    Text("上一页", fontSize = 12.sp)
+                                }
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            isLoading = true
+                                            arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)?.let { json ->
+                                                bleClient?.sendJson(json)
+                                            }
+                                            isLoading = false
+                                        }
+                                    },
+                                    modifier = Modifier.padding(end = 4.dp)
+                                ) {
+                                    Text("下一页", fontSize = 12.sp)
+                                }
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            captureAndSendToEsp("retry")
+                                        }
+                                    },
+                                    modifier = Modifier.padding(end = 4.dp)
+                                ) {
+                                    Text("刷新", fontSize = 12.sp)
                                 }
                                 Button(onClick = {
                                     isEbookMode = false
                                     releaseWakeLock()
                                 }) {
-                                    Text("退出")
+                                    Text("退出", fontSize = 12.sp)
                                 }
-                                Button(onClick = {
-                                    scope.launch {
-                                        isLoading = true
-                                        arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)?.let { json ->
-                                            bleClient?.sendJson(json)
-                                        }
-                                        isLoading = false
-                                    }
-                                }) {
-                                    Text("下一页")
-                                }
-                                Button(onClick = {
-                                    scope.launch {
-                                        captureAndSendToEsp("retry")
-                                    }
-                                }) {
-                                    Text("重新提取")
-                                }
+                            }
+                        }
+
+                        // JSON 内容区域
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 60.dp, max = 200.dp)
+                                .background(Color.White)
+                                .padding(8.dp)
+                        ) {
+                            if (isLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.align(Alignment.Center).size(24.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text(
+                                    text = if (jsonText.isNotBlank()) jsonText else lastStatus.ifBlank { "暂无数据" },
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = Color.Black,
+                                    modifier = Modifier.verticalScroll(rememberScrollState())
+                                )
                             }
                         }
                     }

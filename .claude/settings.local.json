@@ -4,7 +4,13 @@
       "Bash(git -C /Users/beijihu/Github/GSDJX4DoubleSysFserv status --porcelain)",
       "Bash(. /opt/homebrew/esp/esp-idf/export.sh:*)",
       "Bash(idf.py:*)",
-      "Bash(. ~/esp/esp-idf/export.sh)"
+      "Bash(. ~/esp/esp-idf/export.sh)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(.:*)",
+      "Bash(wc -l:*)",
+      "Bash(rm:*)"
     ]
   }
 }

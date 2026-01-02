@@ -8,7 +8,6 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
 
     <application
@@ -39,11 +38,6 @@
             android:name=".GeckoActivity"
             android:exported="false"
             android:theme="@style/Theme.GSDJX4DoubleSysFserv" />
-        <service
-            android:name=".X4Service"
-            android:enabled="true"
-            android:exported="true"
-            android:foregroundServiceType="mediaProjection" />
     </application>
 
 </manifest>
