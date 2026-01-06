@@ -1,6 +1,6 @@
 {
     "java.configuration.updateBuildConfiguration": "automatic",
-    "idf.pythonInstallPath": "/opt/homebrew/bin/python3",
+    "idf.pythonInstallPath": "C:\\Espressif\\tools\\idf-python\\3.11.2\\python.exe",
     "idf.port": "/dev/tty.usbmodem2101",
     "idf.openOcdConfigs": [
         "board/esp32c3-builtin.cfg"
