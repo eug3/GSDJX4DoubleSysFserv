@@ -45,6 +45,9 @@ import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
 import org.mozilla.geckoview.GeckoResult
+import com.guaishoudejia.x4doublesysfserv.ble.BleBookProtocol
+import com.guaishoudejia.x4doublesysfserv.ble.BleBookServer
+import com.guaishoudejia.x4doublesysfserv.ble.DomLayoutRenderer
 import kotlin.coroutines.resume
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -57,6 +60,7 @@ class GeckoActivity : ComponentActivity() {
     private var geckoView: GeckoView? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var bleEspClient: BleEspClient? = null
+    private var bleBookServer: BleBookServer? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -85,6 +89,9 @@ class GeckoActivity : ComponentActivity() {
             var lastStatus by remember { mutableStateOf("") }
             val scope = rememberCoroutineScope()
             var bleClient by remember { mutableStateOf<BleEspClient?>(null) }
+            var bleServerRunning by remember { mutableStateOf(false) }
+            var bleServerInfo by remember { mutableStateOf("") }
+            var logicalPageIndex by remember { mutableStateOf(0) }
             val density = androidx.compose.ui.platform.LocalDensity.current
             val metrics = androidx.compose.ui.platform.LocalContext.current.resources.displayMetrics
             // 固定比例 480:800，宽度拉满设备宽度，高度按比例推算
@@ -114,6 +121,57 @@ class GeckoActivity : ComponentActivity() {
                 return json  // 返回提取的 JSON，避免重复提取
             }
 
+            suspend fun gotoLogicalPage(target: Int): String? {
+                var json: String? = null
+                val diff = target - logicalPageIndex
+                if (diff == 0) {
+                    json = extractDomLayoutJson()
+                    if (!json.isNullOrEmpty()) jsonText = json
+                    return json
+                }
+                val stepKey = if (diff > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+                val steps = kotlin.math.abs(diff)
+                for (i in 0 until steps) {
+                    json = arrowPagerAndRefresh(stepKey)
+                    if (json.isNullOrEmpty()) break
+                    logicalPageIndex += if (diff > 0) 1 else -1
+                    delay(150)
+                }
+                return json
+            }
+
+            suspend fun sendOnePageOverServer(bookId: Int, pageNum: Int, layoutJson: String) {
+                val server = bleBookServer ?: return
+                val dev = server.getConnectedDevice() ?: run {
+                    lastStatus = "BLE Server: 未有设备连接"
+                    return
+                }
+
+                val render = DomLayoutRenderer.renderTo1bpp48k(layoutJson)
+                lastStatus = "渲染并发送: book=$bookId page=$pageNum ${render.debugStats}"
+
+                val page = render.pageBytes48k
+                var offset = 0
+                while (offset < page.size) {
+                    val len = (page.size - offset).coerceAtMost(BleBookProtocol.MAX_DATA_BYTES_PER_CHUNK)
+                    val pkt = BleBookProtocol.buildDataChunk(
+                        bookId = bookId,
+                        pageNum = pageNum,
+                        pageSize = page.size,
+                        offset = offset,
+                        data = page,
+                        dataOffset = offset,
+                        dataLen = len,
+                    )
+                    val ok = server.notify(dev, pkt)
+                    if (!ok) {
+                        lastStatus = "BLE Server: 发送失败 offset=$offset"
+                        return
+                    }
+                    offset += len
+                }
+            }
+
             suspend fun captureAndSendToEsp(reason: String) {
                 isLoading = true
                 val json = extractDomLayoutJson()
@@ -130,6 +188,64 @@ class GeckoActivity : ComponentActivity() {
                     }
                 }
                 isLoading = false
+            }
+
+            fun ensureBleServer() {
+                if (bleBookServer != null) return
+                bleBookServer = BleBookServer(
+                    context = this@GeckoActivity,
+                    scope = scope,
+                    onRequest = { req ->
+                        withContext(Dispatchers.Main) {
+                            isLoading = true
+                            try {
+                                val start = req.startPage
+                                val count = req.pageCount
+                                val original = logicalPageIndex
+                                var last = start
+
+                                // Jump to start page, generate & send sequential pages.
+                                gotoLogicalPage(start)?.let { layoutJson ->
+                                    sendOnePageOverServer(req.bookId, start, layoutJson)
+                                }
+                                last = start
+                                for (i in 1 until count) {
+                                    val p = start + i
+                                    val j = gotoLogicalPage(p)
+                                    if (!j.isNullOrEmpty()) {
+                                        sendOnePageOverServer(req.bookId, p, j)
+                                        last = p
+                                    } else {
+                                        break
+                                    }
+                                }
+
+                                // Restore to original page to reduce UI drift.
+                                gotoLogicalPage(original)
+
+                                // Send END.
+                                val server = bleBookServer
+                                if (server != null) {
+                                    val dev = server.getConnectedDevice()
+                                    if (dev != null) {
+                                        server.notify(dev, BleBookProtocol.buildEnd(req.bookId, last))
+                                    }
+                                }
+
+                                lastStatus = "请求完成 book=${req.bookId} pages=${req.startPage}-${last}"
+                            } finally {
+                                isLoading = false
+                            }
+                        }
+                    }
+                )
+                val ok = bleBookServer?.start() == true
+                bleServerRunning = ok
+                bleServerInfo = if (ok) {
+                    "Server UUID=${bleBookServer?.getServiceUuid()}"
+                } else {
+                    "Server 启动失败（检查蓝牙/权限）"
+                }
             }
 
             // Update currentUrl when navigation happens
@@ -171,6 +287,7 @@ class GeckoActivity : ComponentActivity() {
                         onClick = {
                             isEbookMode = true
                             acquireWakeLock()
+                            ensureBleServer()
 
                             if (targetDeviceAddress != null && bleClient == null) {
                                 bleClient = BleEspClient(
@@ -224,7 +341,7 @@ class GeckoActivity : ComponentActivity() {
                         }
                     }
 
-                    // 蓝牙连接状态提示
+                    // 蓝牙连接状态提示（旧：BLE client；新：BLE server）
                     val connectionStatus = when {
                         bleClient == null -> "未连接"
                         bleEspClient?.let { cl ->
@@ -234,7 +351,7 @@ class GeckoActivity : ComponentActivity() {
                             } catch (_: Exception) {
                                 false
                             }
-                        } -> "已连接"
+                        } == true -> "已连接"
                         else -> "连接中..."
                     }
 
@@ -253,7 +370,7 @@ class GeckoActivity : ComponentActivity() {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "BLE: $connectionStatus",
+                                text = "BLE Client: $connectionStatus\nBLE Server: ${if (bleServerRunning) "运行中" else "未运行"} ${bleServerInfo}",
                                 fontSize = 12.sp,
                                 color = if (connectionStatus == "已连接") Color(0xFF4CAF50) else Color.Gray
                             )
@@ -299,6 +416,12 @@ class GeckoActivity : ComponentActivity() {
                                 Button(onClick = {
                                     isEbookMode = false
                                     releaseWakeLock()
+                                    try {
+                                        bleBookServer?.stop()
+                                    } catch (_: Exception) {
+                                    }
+                                    bleBookServer = null
+                                    bleServerRunning = false
                                 }) {
                                     Text("退出", fontSize = 12.sp)
                                 }

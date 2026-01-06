@@ -265,12 +265,19 @@ class BleEspClient(
                 return
             }
 
-            val svc: BluetoothGattService = gatt.getService(UUID_IMAGE_SERVICE) ?: run {
-                Log.w(TAG, "Image service not found")
-                return
+            // Prefer dynamic matching: find a service containing both a writable char and a notify char.
+            // Fallback to legacy fixed UUIDs if present.
+            val legacySvc = gatt.getService(UUID_IMAGE_SERVICE)
+            val legacyImage = legacySvc?.getCharacteristic(UUID_IMAGE_CHAR)
+            val legacyCmd = legacySvc?.getCharacteristic(UUID_CMD_CHAR)
+
+            val matched = findBestChannels(gatt)
+            imageChar = matched?.first ?: legacyImage
+            cmdChar = matched?.second ?: legacyCmd
+
+            if (imageChar == null || cmdChar == null) {
+                Log.w(TAG, "No suitable GATT channels found (imageChar=${imageChar != null}, cmdChar=${cmdChar != null})")
             }
-            imageChar = svc.getCharacteristic(UUID_IMAGE_CHAR)
-            cmdChar = svc.getCharacteristic(UUID_CMD_CHAR)
 
             Log.i(
                 TAG,
@@ -380,6 +387,72 @@ class BleEspClient(
         cccdRetryAttempts += 1
         Log.w(TAG, "Retry enabling CMD notifications attempt=$cccdRetryAttempts")
         enableNotifications(gatt, cc)
+    }
+
+    private fun findBestChannels(gatt: BluetoothGatt): Pair<BluetoothGattCharacteristic, BluetoothGattCharacteristic>? {
+        val services = try {
+            gatt.services
+        } catch (_: Exception) {
+            null
+        } ?: return null
+
+        var bestScore = Int.MIN_VALUE
+        var best: Pair<BluetoothGattCharacteristic, BluetoothGattCharacteristic>? = null
+
+        for (svc in services) {
+            val chars = svc.characteristics ?: continue
+            var bestWrite: BluetoothGattCharacteristic? = null
+            var bestNotify: BluetoothGattCharacteristic? = null
+
+            for (ch in chars) {
+                val p = ch.properties
+                val canWrite = (p and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ||
+                    (p and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                val canNotify = (p and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 ||
+                    (p and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+
+                if (canWrite) {
+                    // Prefer write-with-response for reliability
+                    val score = if ((p and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0) 2 else 1
+                    val curScore = if (bestWrite == null) -1 else {
+                        val bp = bestWrite!!.properties
+                        if ((bp and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0) 2 else 1
+                    }
+                    if (score > curScore) bestWrite = ch
+                }
+
+                if (canNotify) {
+                    // Prefer notify over indicate (lower latency)
+                    val score = if ((p and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0) 2 else 1
+                    val curScore = if (bestNotify == null) -1 else {
+                        val bp = bestNotify!!.properties
+                        if ((bp and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0) 2 else 1
+                    }
+                    if (score > curScore) bestNotify = ch
+                }
+            }
+
+            if (bestWrite != null && bestNotify != null) {
+                var score = 0
+                // Prefer custom 128-bit UUID service (usually random) over standard SIG services.
+                if (svc.uuid.toString().length > 8) score += 5
+                // Prefer having CCCD present on notify char.
+                val hasCccd = bestNotify.getDescriptor(UUID_CCCD) != null
+                if (hasCccd) score += 3
+                // Prefer service that also matches legacy UUID (keeps compatibility).
+                if (svc.uuid == UUID_IMAGE_SERVICE) score += 10
+
+                if (score > bestScore) {
+                    bestScore = score
+                    best = bestWrite to bestNotify
+                }
+            }
+        }
+
+        if (best != null) {
+            Log.i(TAG, "Dynamic channels selected: write=${best.first.uuid} notify=${best.second.uuid} score=$bestScore")
+        }
+        return best
     }
 
     private fun buildFrameHeader(payloadLen: Int): ByteArray {
