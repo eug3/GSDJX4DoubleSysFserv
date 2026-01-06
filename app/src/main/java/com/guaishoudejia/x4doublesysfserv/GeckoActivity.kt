@@ -147,7 +147,8 @@ class GeckoActivity : ComponentActivity() {
                     return
                 }
 
-                val render = DomLayoutRenderer.renderTo1bpp48k(layoutJson)
+                val shot = captureViewportBitmap()
+                val render = DomLayoutRenderer.renderTo1bpp48k(layoutJson, shot)
                 lastStatus = "渲染并发送: book=$bookId page=$pageNum ${render.debugStats}"
 
                 val page = render.pageBytes48k
@@ -509,6 +510,7 @@ class GeckoActivity : ComponentActivity() {
                 "(function(){" +
                 "try {" +
                 " const elements=[];" +
+                " const images=[];" +
                 " const walker=document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);" +
                 " let n;" +
                 " while(n=walker.nextNode()){" +
@@ -518,7 +520,16 @@ class GeckoActivity : ComponentActivity() {
                 "   var r=p.getBoundingClientRect(); if(r.width===0||r.height===0) continue;" +
                 "   elements.push({text:t,x:Math.round(r.left),y:Math.round(r.top),width:Math.round(r.width),height:Math.round(r.height),fontSize:cs.fontSize,fontFamily:cs.fontFamily,fontWeight:cs.fontWeight,color:cs.color});" +
                 " }" +
-                " const payload={url:location.href,title:document.title,viewport:{width:innerWidth,height:innerHeight},elements:elements};" +
+                " const imgs=document.images?Array.from(document.images):[];" +
+                " for (var i=0;i<imgs.length;i++){" +
+                "   var im=imgs[i];" +
+                "   if(!im) continue;" +
+                "   var cs=getComputedStyle(im); if(cs.display==='none'||cs.visibility==='hidden') continue;" +
+                "   var r=im.getBoundingClientRect(); if(r.width===0||r.height===0) continue;" +
+                "   var src=im.currentSrc||im.src||'';" +
+                "   images.push({x:Math.round(r.left),y:Math.round(r.top),width:Math.round(r.width),height:Math.round(r.height),src:src});" +
+                " }" +
+                " const payload={url:location.href,title:document.title,viewport:{width:innerWidth,height:innerHeight,dpr:window.devicePixelRatio||1},elements:elements,images:images};" +
                 " const out=encodeURIComponent(JSON.stringify(payload));" +
                 " location.href='x4json://'+out;" +
                 "} catch(e){ location.href='x4json://'+encodeURIComponent(JSON.stringify({error:String(e)})); }" +
@@ -542,6 +553,22 @@ class GeckoActivity : ComponentActivity() {
                     s.progressDelegate = prevProgress
                     cont.resume(null)
                 }
+            }
+        }
+    }
+
+    private suspend fun captureViewportBitmap(): Bitmap? = withContext(Dispatchers.Main) {
+        val v = geckoView ?: return@withContext null
+        suspendCancellableCoroutine<Bitmap?> { cont ->
+            try {
+                val r: GeckoResult<Bitmap> = v.capturePixels()
+                r.accept({ bmp ->
+                    if (!cont.isCompleted) cont.resume(bmp)
+                }, { _ ->
+                    if (!cont.isCompleted) cont.resume(null)
+                })
+            } catch (_: Exception) {
+                if (!cont.isCompleted) cont.resume(null)
             }
         }
     }
