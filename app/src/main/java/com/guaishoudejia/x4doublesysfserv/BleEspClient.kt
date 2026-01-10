@@ -35,12 +35,26 @@ class BleEspClient(
     private var mtuPayload: Int = 20
 
     private var isConnected: Boolean = false
+
+    // 公共 getter，供 UI 判断连接状态
+    fun isConnected(): Boolean = isConnected
+
     private var cmdNotificationsEnabled: Boolean = false
 
     private var pendingFrame: ByteArray? = null
     private var pendingOffset: Int = 0
     private var sending: Boolean = false
     private var lastChunkSize: Int = 0
+    
+    // 发送锁：防止并发调用sendNextPacket
+    private var isSendingPacket = false
+
+    // 发送队列：支持多个帧排队发送
+    private val pendingQueue = mutableListOf<ByteArray>()
+
+    // 重试计数
+    private var retryCount = 0
+    private val maxRetries = 3
 
     private var cccdRetryAttempts: Int = 0
 
@@ -90,7 +104,9 @@ class BleEspClient(
         sending = false
         pendingFrame = null
         pendingOffset = 0
-        
+        pendingQueue.clear()
+        retryCount = 0
+
         // 重置电子书状态
         synchronized(pageSyncLock) {
             currentBookId = 0
@@ -126,13 +142,14 @@ class BleEspClient(
         System.arraycopy(payload, 0, frame, header.size, payload.size)
         Log.d(TAG, "Prepared JSON frame: header=${header.size} payload=${payload.size} total=${frame.size}")
 
-        pendingFrame = frame
-        pendingOffset = 0
         if (!sending) {
+            pendingFrame = frame
+            pendingOffset = 0
             sending = true
             sendNextPacket()
         } else {
-            Log.w(TAG, "Already sending, replaced pending frame")
+            pendingQueue.add(frame)
+            Log.w(TAG, "Already sending, frame queued (queue size=${pendingQueue.size})")
         }
     }
 
@@ -145,13 +162,14 @@ class BleEspClient(
         System.arraycopy(payload, 0, frame, header.size, payload.size)
         Log.d(TAG, "Prepared frame: header=${header.size} payload=${payload.size} total=${frame.size}")
 
-        pendingFrame = frame
-        pendingOffset = 0
         if (!sending) {
+            pendingFrame = frame
+            pendingOffset = 0
             sending = true
             sendNextPacket()
         } else {
-            Log.w(TAG, "Already sending, replaced pending frame")
+            pendingQueue.add(frame)
+            Log.w(TAG, "Already sending, frame queued (queue size=${pendingQueue.size})")
         }
     }
 
@@ -193,13 +211,14 @@ class BleEspClient(
         
         Log.d(TAG, "Prepared 1bit bitmap frame: header=${header.size} payload=${bitmapData.size} total=${frame.size}")
 
-        pendingFrame = frame
-        pendingOffset = 0
         if (!sending) {
+            pendingFrame = frame
+            pendingOffset = 0
             sending = true
             sendNextPacket()
         } else {
-            Log.w(TAG, "Already sending, replaced pending bitmap frame")
+            pendingQueue.add(frame)
+            Log.w(TAG, "Already sending, frame queued (queue size=${pendingQueue.size})")
         }
     }
 
@@ -332,27 +351,59 @@ class BleEspClient(
 
     @SuppressLint("MissingPermission")
     private fun sendNextPacket() {
+        // 防止并发调用
+        if (isSendingPacket) {
+            Log.w(TAG, "sendNextPacket: already sending, ignoring concurrent call")
+            return
+        }
+        isSendingPacket = true
+        
         val g = gatt ?: run {
             Log.w(TAG, "sendNextPacket: gatt is null")
             sending = false
+            retryCount = 0
+            isSendingPacket = false
             return
         }
-        val ch = imageChar ?: run {
+        var ch = imageChar
+        
+        // 每次发送前，尝试刷新 characteristic 引用以确保它是有效的
+        if (ch == null && g.services.isNotEmpty()) {
+            Log.w(TAG, "Attempting to refresh imageChar from services")
+            for (svc in g.services) {
+                for (char in svc.characteristics) {
+                    if (char.uuid == UUID_IMAGE_CHAR) {
+                        ch = char
+                        imageChar = char
+                        break
+                    }
+                }
+                if (ch != null) break
+            }
+        }
+        
+        if (ch == null) {
             // Common race: UI triggers send before services are discovered.
             // Keep pendingFrame and let onServicesDiscovered resume sending.
             if (pendingFrame != null) {
-                Log.d(TAG, "sendNextPacket: imageChar not ready yet; will retry after services discovered")
+                Log.w(TAG, "sendNextPacket: imageChar not ready, will retry later")
             }
             sending = false
+            retryCount = 0
+            isSendingPacket = false
             return
         }
         val frame = pendingFrame ?: run {
             sending = false
+            retryCount = 0
+            isSendingPacket = false
             return
         }
 
         if (pendingOffset >= frame.size) {
             sending = false
+            retryCount = 0
+            isSendingPacket = false
             return
         }
 
@@ -360,28 +411,63 @@ class BleEspClient(
         val end = (pendingOffset + maxChunk).coerceAtMost(frame.size)
         val chunk = frame.copyOfRange(pendingOffset, end)
         lastChunkSize = chunk.size
+
         if (pendingOffset == 0) {
-            Log.d(TAG, "Starting frame transfer: total=${frame.size} bytes, MTU payload=$mtuPayload")
+            Log.d(TAG, "Starting frame transfer: total=${frame.size} bytes, MTU payload=$mtuPayload, chunk size=$lastChunkSize")
         } else if ((pendingOffset % 10000) < lastChunkSize) {
             Log.d(TAG, "Transfer progress: $pendingOffset / ${frame.size} bytes")
         }
 
+        // 检查 characteristic 属性
+        val props = ch.properties
+        val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
+        val canWriteNoResp = (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+        Log.d(TAG, "Characteristic properties: WRITE=$canWrite, WRITE_NO_RESP=$canWriteNoResp, uuid=${ch.uuid}")
+
+        // 使用 WRITE_TYPE_DEFAULT 以便接收ESP32的ACK确认
+        val writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+
         val ok: Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val status = g.writeCharacteristic(ch, chunk, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            val status = g.writeCharacteristic(ch, chunk, writeType)
+            Log.d(TAG, "writeCharacteristic(T) status=$status, writeType=$writeType")
             status == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             run {
-                ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                ch.writeType = writeType
                 ch.value = chunk
-                g.writeCharacteristic(ch)
+                val result = g.writeCharacteristic(ch)
+                Log.d(TAG, "writeCharacteristic(legacy) result=$result, chunk.size=${chunk.size}, mtuPayload=$mtuPayload, writeType=$writeType")
+                result
             }
         }
 
         if (!ok) {
-            Log.w(TAG, "writeCharacteristic returned false")
-            sending = false
+            retryCount++
+            if (retryCount > maxRetries) {
+                Log.e(TAG, "Max retries reached, aborting transfer")
+                sending = false
+                pendingFrame = null
+                pendingOffset = 0
+                pendingQueue.clear()
+                retryCount = 0
+                isSendingPacket = false
+                return
+            }
+            Log.w(TAG, "writeCharacteristic failed, retry=$retryCount/$maxRetries")
+            isSendingPacket = false
+            // 延迟重试
+            scope.launch(Dispatchers.Main) {
+                delay(50)
+                sendNextPacket()
+            }
+            return
         }
+        
+        // 写入成功，等待ACK
+        retryCount = 0
+        Log.d(TAG, "Sent $lastChunkSize bytes (WRITE_TYPE_DEFAULT mode), waiting for callback")
+        isSendingPacket = false
     }
 
     private fun onPacketWritten(success: Boolean) {
@@ -390,24 +476,55 @@ class BleEspClient(
             sending = false
             pendingFrame = null
             pendingOffset = 0
+            pendingQueue.clear()
+            retryCount = 0
             return
         }
-        if (pendingOffset >= (pendingFrame?.size ?: 0)) {
-            Log.i(TAG, "Frame transfer completed: $pendingOffset bytes sent")
-        }
+
         val frame = pendingFrame ?: run {
+            Log.w(TAG, "onPacketWritten: pendingFrame is null")
             sending = false
+            retryCount = 0
+            // 尝试处理队列中的下一帧
+            if (pendingQueue.isNotEmpty()) {
+                pendingFrame = pendingQueue.removeAt(0)
+                pendingOffset = 0
+                sending = true
+                scope.launch(Dispatchers.Main) {
+                    sendNextPacket()
+                }
+            }
             return
         }
-        pendingOffset = (pendingOffset + lastChunkSize).coerceAtMost(frame.size)
+
+        pendingOffset += lastChunkSize
+
         if (pendingOffset >= frame.size) {
-            // Done; clear pending frame.
-            pendingFrame = null
-            pendingOffset = 0
-            sending = false
+            // 当前帧发送完成
+            Log.i(TAG, "Frame transfer completed: ${frame.size} bytes sent")
+            retryCount = 0
+
+            // 检查队列中是否有更多帧
+            if (pendingQueue.isNotEmpty()) {
+                pendingFrame = pendingQueue.removeAt(0)
+                pendingOffset = 0
+                Log.i(TAG, "Processing next frame from queue: ${pendingFrame!!.size} bytes")
+                scope.launch(Dispatchers.Main) {
+                    sendNextPacket()
+                }
+            } else {
+                // 全部发送完成
+                pendingFrame = null
+                pendingOffset = 0
+                sending = false
+                Log.i(TAG, "All frames sent; sending=false")
+            }
             return
         }
-        sendNextPacket()
+
+        scope.launch(Dispatchers.Main) {
+            sendNextPacket()
+        }
     }
 
     private fun getAdapter(): BluetoothAdapter? {
@@ -430,14 +547,34 @@ class BleEspClient(
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             Log.d(TAG, "onConnectionStateChange status=$status newState=$newState")
             if (newState == BluetoothGatt.STATE_CONNECTED) {
+                this@BleEspClient.gatt = gatt  // 保存 gatt 对象引用
                 isConnected = true
                 cmdNotificationsEnabled = false
                 cccdRetryAttempts = 0
                 try {
+                    Log.d(TAG, "Requesting MTU 517")
                     gatt.requestMtu(517)
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    Log.w(TAG, "requestMtu failed", e)
                 }
-                gatt.discoverServices()
+                // 延迟一段时间确保连接充分建立后再发现服务
+                scope.launch(Dispatchers.Main) {
+                    delay(500)
+                    Log.d(TAG, "Calling discoverServices after delay")
+                    val g = this@BleEspClient.gatt
+                    if (g != null) {
+                        val result = g.discoverServices()
+                        Log.d(TAG, "discoverServices returned: $result")
+                        
+                        // 立即尝试处理服务（不等回调）
+                        scope.launch(Dispatchers.Main) {
+                            delay(2000)  // 给系统充足的时间发现服务
+                            tryProcessServices(g)
+                        }
+                    } else {
+                        Log.w(TAG, "gatt is null when calling discoverServices")
+                    }
+                }
             } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
                 isConnected = false
                 imageChar = null
@@ -445,6 +582,72 @@ class BleEspClient(
                 cmdNotificationsEnabled = false
                 cccdRetryAttempts = 0
                 sending = false
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        private fun tryProcessServices(gatt: BluetoothGatt) {
+            Log.d(TAG, "tryProcessServices called, services count=${gatt.services.size}")
+            if (gatt.services.isEmpty()) {
+                Log.w(TAG, "No services discovered yet, retrying...")
+                scope.launch(Dispatchers.Main) {
+                    delay(1000)
+                    tryProcessServices(gatt)
+                }
+                return
+            }
+            
+            // 处理服务
+            val legacySvc = gatt.getService(UUID_IMAGE_SERVICE)
+            Log.d(TAG, "legacySvc (IMAGE_SERVICE)=${legacySvc != null}")
+            val legacyImage = legacySvc?.getCharacteristic(UUID_IMAGE_CHAR)
+            val legacyCmd = legacySvc?.getCharacteristic(UUID_CMD_CHAR)
+            Log.d(TAG, "legacyImage=${legacyImage != null}, legacyCmd=${legacyCmd != null}")
+            
+            // Also try SPP UUIDs
+            val sppSvc = gatt.getService(UUID_SPP_SERVICE)
+            Log.d(TAG, "sppSvc (SPP_SERVICE)=${sppSvc != null}")
+            val sppChar = sppSvc?.getCharacteristic(UUID_SPP_CHAR)
+            Log.d(TAG, "sppChar=${sppChar != null}")
+
+            val matched = findBestChannels(gatt)
+            imageChar = matched?.first ?: legacyImage ?: sppChar
+            cmdChar = matched?.second ?: legacyCmd ?: sppChar
+
+            if (imageChar == null || cmdChar == null) {
+                Log.w(TAG, "No suitable GATT channels found (imageChar=${imageChar != null}, cmdChar=${cmdChar != null})")
+            }
+
+            Log.i(
+                TAG,
+                "Services ready: imageChar=${imageChar != null} (uuid=${imageChar?.uuid}) cmdChar=${cmdChar != null} (uuid=${cmdChar?.uuid}) connected=$isConnected"
+            )
+
+            val cc = cmdChar
+            val ic = imageChar
+            
+            // 为接收ACK，需要订阅imageChar的通知（如果和cmdChar是同一个，则只订阅一次）
+            if (ic != null && ic.uuid != cc?.uuid) {
+                enableNotifications(gatt, ic)
+                Log.i(TAG, "Enabled notifications for imageChar (for ACK): ${ic.uuid}")
+            }
+            
+            if (cc != null) {
+                enableNotifications(gatt, cc)
+                // Schedule a check to ensure CCCD took effect; retry if needed.
+                scope.launch(Dispatchers.Main) {
+                    delay(1000)
+                    ensureCmdNotifications(gatt)
+                }
+            } else {
+                Log.w(TAG, "CMD characteristic not found")
+            }
+
+            // If a frame was queued before discovery completed, resume sending now.
+            if (pendingFrame != null && !sending && imageChar != null) {
+                Log.i(TAG, "Resuming queued frame send after services discovered")
+                sending = true
+                sendNextPacket()
             }
         }
 
@@ -458,6 +661,8 @@ class BleEspClient(
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            Log.e(TAG, ">>> onServicesDiscovered CALLED: status=$status <<<")
+            Log.d(TAG, "onServicesDiscovered called: status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "onServicesDiscovered status=$status")
                 return
@@ -466,12 +671,16 @@ class BleEspClient(
             // Prefer dynamic matching: find a service containing both a writable char and a notify char.
             // Fallback to legacy fixed UUIDs if present.
             val legacySvc = gatt.getService(UUID_IMAGE_SERVICE)
+            Log.d(TAG, "legacySvc (IMAGE_SERVICE)=${legacySvc != null}")
             val legacyImage = legacySvc?.getCharacteristic(UUID_IMAGE_CHAR)
             val legacyCmd = legacySvc?.getCharacteristic(UUID_CMD_CHAR)
+            Log.d(TAG, "legacyImage=${legacyImage != null}, legacyCmd=${legacyCmd != null}")
             
             // Also try SPP UUIDs
             val sppSvc = gatt.getService(UUID_SPP_SERVICE)
+            Log.d(TAG, "sppSvc (SPP_SERVICE)=${sppSvc != null}")
             val sppChar = sppSvc?.getCharacteristic(UUID_SPP_CHAR)
+            Log.d(TAG, "sppChar=${sppChar != null}")
 
             val matched = findBestChannels(gatt)
             imageChar = matched?.first ?: legacyImage ?: sppChar
@@ -483,10 +692,18 @@ class BleEspClient(
 
             Log.i(
                 TAG,
-                "Services ready: imageChar=${imageChar != null} cmdChar=${cmdChar != null} connected=$isConnected"
+                "Services ready: imageChar=${imageChar != null} (uuid=${imageChar?.uuid}) cmdChar=${cmdChar != null} (uuid=${cmdChar?.uuid}) connected=$isConnected"
             )
 
             val cc = cmdChar
+            val ic = imageChar
+            
+            // 为接收ACK，需要订阅imageChar的通知（如果和cmdChar是同一个，则只订阅一次）
+            if (ic != null && ic.uuid != cc?.uuid) {
+                enableNotifications(gatt, ic)
+                Log.i(TAG, "Enabled notifications for imageChar (for ACK): ${ic.uuid}")
+            }
+            
             if (cc != null) {
                 enableNotifications(gatt, cc)
                 // Schedule a check to ensure CCCD took effect; retry if needed.
@@ -524,29 +741,60 @@ class BleEspClient(
             }
         }
 
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            if (characteristic.uuid != UUID_CMD_CHAR) return
-            val value = characteristic.value ?: return
-            val cmd = try {
-                value.toString(Charsets.UTF_8).trim()
-            } catch (_: Exception) {
+        @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            val value = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                characteristic.value ?: ByteArray(0)
+            } else {
+                @Suppress("DEPRECATION")
+                characteristic.value ?: ByteArray(0)
+            }
+            
+            Log.i(TAG, "onCharacteristicChanged: ${value.size} bytes from ${characteristic.uuid}")
+            
+            // 检查是否是ACK响应 (1字节, 0x06)
+            if (value.size == 1 && value[0] == 0x06.toByte()) {
+                Log.d(TAG, "ACK received from ESP32, triggering next packet")
+                // ACK驱动下一包发送
+                onPacketWritten(true)
                 return
             }
-            if (cmd.isBlank()) return
-            Log.i(TAG, "Received BLE command from ESP32: '$cmd'")
+            
+            // 处理命令通知
+            if (characteristic.uuid == UUID_CMD_CHAR || characteristic.uuid == UUID_SPP_CHAR) {
+                val cmd = try {
+                    value.toString(Charsets.UTF_8).trim()
+                } catch (_: Exception) {
+                    return
+                }
+                if (cmd.isBlank()) return
+                Log.i(TAG, "Received BLE command from ESP32: '$cmd'")
 
-            scope.launch(Dispatchers.Main) {
-                // 处理页码同步消息
-                if (cmd.startsWith("PAGE:")) {
-                    try {
-                        val pageNum = cmd.substring(5).toInt()
-                        handlePageChangeNotification(pageNum)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse page number from: $cmd", e)
+                scope.launch(Dispatchers.Main) {
+                    // 处理页码同步消息
+                    if (cmd.startsWith("PAGE:")) {
+                        try {
+                            val pageNum = cmd.substring(5).toInt()
+                            handlePageChangeNotification(pageNum)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to parse page number from: $cmd", e)
+                        }
+                    } else if (cmd.startsWith("USER_CONFIRMED:")) {
+                        // 用户在 ESP32 上按下确认按钮，开始渲染并发送第 2、3 帧
+                        try {
+                            Log.i(TAG, "Received USER_CONFIRMED notification from ESP32")
+                            // 触发渲染第 1、2 帧（页码从 1 开始，因为 0 已经发送过了）
+                            onCommand("RENDER_NEXT_PAGES:1,2")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to handle USER_CONFIRMED: $cmd", e)
+                        }
+                    } else {
+                        // 处理其他命令
+                        onCommand(cmd)
                     }
-                } else {
-                    // 处理其他命令
-                    onCommand(cmd)
                 }
             }
         }
@@ -556,8 +804,19 @@ class BleEspClient(
             characteristic: BluetoothGattCharacteristic,
             status: Int,
         ) {
-            if (characteristic.uuid != UUID_IMAGE_CHAR) return
-            onPacketWritten(status == BluetoothGatt.GATT_SUCCESS)
+            if (characteristic.uuid != UUID_IMAGE_CHAR && characteristic.uuid != UUID_SPP_CHAR) return
+            Log.d(TAG, "onCharacteristicWrite: status=$status, UUID=${characteristic.uuid}, pendingOffset=$pendingOffset")
+            
+            // 只记录写入完成，不触发继续发送
+            // 继续发送由ACK通知驱动（见onCharacteristicChanged）
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "Write failed with status=$status, aborting transfer")
+                sending = false
+                pendingFrame = null
+                pendingOffset = 0
+                pendingQueue.clear()
+                retryCount = 0
+            }
         }
     }
 
@@ -645,6 +904,7 @@ class BleEspClient(
                 }
             }
 
+            // 情况1: 同一个 service 有独立的 write 和 notify characteristic
             if (bestWrite != null && bestNotify != null) {
                 var score = 0
                 // Prefer custom 128-bit UUID service (usually random) over standard SIG services.
@@ -662,10 +922,32 @@ class BleEspClient(
                     best = bestWrite to bestNotify
                 }
             }
+            // 情况2: 只有 bestWrite，检查它是否也支持通知
+            else if (bestWrite != null) {
+                val props = bestWrite.properties
+                val canNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 ||
+                    (props and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+                if (canNotify) {
+                    var score = 0
+                    if (svc.uuid.toString().length > 8) score += 5
+                    if (bestWrite.getDescriptor(UUID_CCCD) != null) score += 3
+                    if (svc.uuid == UUID_IMAGE_SERVICE) score += 10
+                    if (svc.uuid == UUID_SPP_SERVICE) score += 10
+
+                    // 使用同一个 characteristic，降低优先级
+                    score -= 1
+
+                    if (score > bestScore) {
+                        bestScore = score
+                        best = bestWrite to bestWrite
+                    }
+                }
+            }
         }
 
         if (best != null) {
-            Log.i(TAG, "Dynamic channels selected: write=${best.first.uuid} notify=${best.second.uuid} score=$bestScore")
+            val sameChar = best.first == best.second
+            Log.i(TAG, "Dynamic channels selected: write=${best.first.uuid} notify=${best.second.uuid} score=$bestScore sameChar=$sameChar")
         }
         return best
     }
@@ -741,7 +1023,7 @@ class BleEspClient(
         return out
     }
 
-    private companion object {
+    companion object {
         private const val TAG = "BleEspClient"
 
         // Legacy custom UUIDs

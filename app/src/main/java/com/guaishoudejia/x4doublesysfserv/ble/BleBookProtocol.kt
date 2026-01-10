@@ -10,8 +10,8 @@ object BleBookProtocol {
     const val TYPE_ACK: Int = 0x04
     const val TYPE_ERROR: Int = 0xFF
 
-    /** Device-side expects 48 * 1024 bytes per page. */
-    const val PAGE_SIZE_BYTES: Int = 48 * 1024
+    /** Device framebuffer: 480x800 pixels, 1-bit depth = (480*800)/8 = 48000 bytes per page. */
+    const val PAGE_SIZE_BYTES: Int = 48000
 
     /**
      * Packed header layout (must match device: ble_book_protocol.h, BLE_PACKED).
