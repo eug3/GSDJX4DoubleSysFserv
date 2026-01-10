@@ -101,6 +101,47 @@ class GeckoActivity : ComponentActivity() {
             val wDp = with(density) { wPx.toDp() }
             val hDp = with(density) { hPx.toDp() }
 
+            fun convertScreenshotTo1bit(sourceBitmap: Bitmap): ByteArray {
+                // 缩放到480x800
+                val scaledBitmap = if (sourceBitmap.width != 480 || sourceBitmap.height != 800) {
+                    Bitmap.createScaledBitmap(sourceBitmap, 480, 800, true)
+                } else {
+                    sourceBitmap
+                }
+                
+                // 转为1bit格式：480x800 = 48000字节
+                val bytesPerRow = 60  // (480 + 7) / 8
+                val buffer = ByteArray(48000)
+                buffer.fill(0xFF.toByte())  // 初始化为全白
+                
+                val pixels = IntArray(480)
+                for (y in 0 until 800) {
+                    scaledBitmap.getPixels(pixels, 0, 480, 0, y, 480, 1)
+                    
+                    for (x in 0 until 480) {
+                        val rgb = pixels[x]
+                        // 提取RGB并转灰度
+                        val r = (rgb shr 16) and 0xFF
+                        val g = (rgb shr 8) and 0xFF
+                        val b = rgb and 0xFF
+                        val gray = (0.299f * r + 0.587f * g + 0.114f * b).toInt()
+                        
+                        // 阈值127：>127白(1), <=127黑(0)
+                        val bit = if (gray > 127) 1 else 0
+                        
+                        // 写入位缓冲：MSB优先
+                        val byteIndex = y * bytesPerRow + (x / 8)
+                        val bitIndex = 7 - (x % 8)
+                        if (bit == 0) {
+                            buffer[byteIndex] = (buffer[byteIndex].toInt() and (1 shl bitIndex).inv()).toByte()
+                        }
+                    }
+                }
+                
+                Log.d("GeckoActivity", "Converted screenshot to 1bit: 480x800, ${buffer.size} bytes")
+                return buffer
+            }
+
             fun dispatchArrow(keyCode: Int) {
                 val view = geckoView ?: return
                 view.requestFocus()
@@ -173,24 +214,67 @@ class GeckoActivity : ComponentActivity() {
                 }
             }
 
-            suspend fun captureAndSendToEsp(reason: String) {
+            suspend fun sendPageByNumber(pageNum: Int) {
                 isLoading = true
-                val json = extractDomLayoutJson()
-                if (json == null || json.isEmpty()) {
-                    lastStatus = "未提取到 DOM 数据"
-                } else {
-                    lastStatus = "提取到 ${json.length} 字节 JSON"
-                    jsonText = json
+                try {
+                    // 跳转到指定页码
+                    val layoutJson = gotoLogicalPage(pageNum)
+                    if (layoutJson.isNullOrEmpty()) {
+                        lastStatus = "跳转到页码 $pageNum 失败"
+                        isLoading = false
+                        return
+                    }
+                    
+                    // 获取该页的截图（用于提取图片）
+                    val screenshot = captureViewportBitmap()
+                    
+                    // 渲染为 1-bit 位图
+                    val render = DomLayoutRenderer.renderTo1bpp48k(layoutJson, screenshot)
+                    lastStatus = "已跳转到第 $pageNum 页并渲染"
+                    
+                    // 通过 BLE 发送给电子书
                     val client = bleClient
                     if (client != null) {
-                        client.sendJson(json)
+                        client.sendRawBitmap(render.pageBytes48k)
                     } else {
-                        lastStatus = "BLE未连接（$reason）"
+                        lastStatus = "BLE 未连接"
                     }
+                } catch (e: Exception) {
+                    lastStatus = "页码跳转失败: ${e.message}"
+                    Log.e("GeckoActivity", "sendPageByNumber error", e)
                 }
                 isLoading = false
             }
 
+            suspend fun captureAndSendToEsp(reason: String) {
+                isLoading = true
+                try {
+                    // 截获浏览器当前画面
+                    val screenshot = captureViewportBitmap()
+                    if (screenshot == null) {
+                        lastStatus = "截图失败"
+                        isLoading = false
+                        return
+                    }
+                    
+                    // 将截图转换为480x800的1bit位图
+                    val bitmap1bit = convertScreenshotTo1bit(screenshot)
+                    lastStatus = "已截图并转换为1bit (${bitmap1bit.size} 字节)"
+                    
+                    // 通过BLE发送给电子书
+                    val client = bleClient
+                    if (client != null) {
+                        client.sendRawBitmap(bitmap1bit)
+                    } else {
+                        lastStatus = "BLE未连接（$reason）"
+                    }
+                } catch (e: Exception) {
+                    lastStatus = "处理截图失败: ${e.message}"
+                    Log.e("GeckoActivity", "captureAndSendToEsp error", e)
+                }
+                isLoading = false
+            }
+            
             fun ensureBleServer() {
                 if (bleBookServer != null) return
                 bleBookServer = BleBookServer(
@@ -296,24 +380,17 @@ class GeckoActivity : ComponentActivity() {
                                     deviceAddress = targetDeviceAddress,
                                     scope = scope,
                                     onCommand = { cmd ->
-                                        when (cmd) {
-                                            "prev" -> scope.launch {
-                                                isLoading = true
-                                                arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)?.let { json ->
-                                                    bleClient?.sendJson(json)
+                                        // 处理电子书发来的页码请求: "PAGE:123"
+                                        if (cmd.startsWith("PAGE:")) {
+                                            val pageNum = cmd.substringAfter("PAGE:").toIntOrNull()
+                                            if (pageNum != null) {
+                                                scope.launch {
+                                                    Log.d("GeckoActivity", "电子书请求页码: $pageNum")
+                                                    sendPageByNumber(pageNum)
                                                 }
-                                                isLoading = false
                                             }
-                                            "next" -> scope.launch {
-                                                isLoading = true
-                                                arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)?.let { json ->
-                                                    bleClient?.sendJson(json)
-                                                }
-                                                isLoading = false
-                                            }
-                                            "capture" -> scope.launch {
-                                                captureAndSendToEsp("capture")
-                                            }
+                                        } else {
+                                            Log.w("GeckoActivity", "未知的 BLE 命令: $cmd")
                                         }
                                     }
                                 ).also {
@@ -323,7 +400,7 @@ class GeckoActivity : ComponentActivity() {
                             }
 
                             scope.launch {
-                                captureAndSendToEsp("enter")
+                                sendPageByNumber(logicalPageIndex)
                             }
                         },
                         modifier = Modifier
@@ -380,9 +457,9 @@ class GeckoActivity : ComponentActivity() {
                                     onClick = {
                                         scope.launch {
                                             isLoading = true
-                                            arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_LEFT)?.let { json ->
-                                                bleClient?.sendJson(json)
-                                            }
+                                            dispatchArrow(KeyEvent.KEYCODE_DPAD_LEFT)
+                                            delay(200)
+                                            captureAndSendToEsp("prevButton")
                                             isLoading = false
                                         }
                                     },
@@ -394,9 +471,9 @@ class GeckoActivity : ComponentActivity() {
                                     onClick = {
                                         scope.launch {
                                             isLoading = true
-                                            arrowPagerAndRefresh(KeyEvent.KEYCODE_DPAD_RIGHT)?.let { json ->
-                                                bleClient?.sendJson(json)
-                                            }
+                                            dispatchArrow(KeyEvent.KEYCODE_DPAD_RIGHT)
+                                            delay(200)
+                                            captureAndSendToEsp("nextButton")
                                             isLoading = false
                                         }
                                     },

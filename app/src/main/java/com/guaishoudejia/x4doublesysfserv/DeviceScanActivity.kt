@@ -17,17 +17,19 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @SuppressLint("MissingPermission") // Permissions are requested at runtime
 class DeviceScanActivity : ComponentActivity() {
@@ -39,11 +41,16 @@ class DeviceScanActivity : ComponentActivity() {
     private val bleScanner by lazy { bluetoothAdapter?.bluetoothLeScanner }
     private var isScanning by mutableStateOf(false)
     private val scanResults = mutableStateListOf<ScanResult>()
+    private var isConnecting by mutableStateOf(false)
+    private var connectedDeviceAddress by mutableStateOf<String?>(null)
+    private var bleClient: BleEspClient? = null
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            // Ensure devices are not duplicated in the list
-            if (scanResults.none { it.device.address == result.device.address }) {
+            // 只添加有名称的设备，过滤掉未知设备
+            val deviceName = result.device.name
+            if (!deviceName.isNullOrBlank() && 
+                scanResults.none { it.device.address == result.device.address }) {
                 scanResults.add(result)
             }
         }
@@ -76,13 +83,46 @@ class DeviceScanActivity : ComponentActivity() {
                 DeviceScanScreen(
                     isScanning = isScanning,
                     scanResults = scanResults,
+                    isConnecting = isConnecting,
+                    connectedDevice = connectedDeviceAddress,
                     onDeviceSelected = { deviceAddress ->
+                        if (isConnecting) return@DeviceScanScreen
+                        
+                        isConnecting = true
                         bleScanner?.stopScan(scanCallback)
-                        val resultIntent = Intent().apply {
-                            putExtra(EXTRA_DEVICE_ADDRESS, deviceAddress)
+                        
+                        // 创建 BleEspClient 并连接
+                        bleClient = BleEspClient(
+                            context = this,
+                            deviceAddress = deviceAddress,
+                            onCommand = { },
+                            scope = lifecycleScope
+                        ).apply {
+                            // 监听连接状态
+                            lifecycleScope.launch {
+                                delay(1000) // 等待连接建立
+                                
+                                // 检查连接状态
+                                val isConnectedField = this@apply::class.java.getDeclaredField("isConnected")
+                                isConnectedField.isAccessible = true
+                                val connected = isConnectedField.getBoolean(this@apply)
+                                
+                                if (connected) {
+                                    connectedDeviceAddress = deviceAddress
+                                    // 连接成功，跳转到浏览器
+                                    val resultIntent = Intent().apply {
+                                        putExtra(EXTRA_DEVICE_ADDRESS, deviceAddress)
+                                    }
+                                    setResult(Activity.RESULT_OK, resultIntent)
+                                    finish()
+                                } else {
+                                    // 连接失败，重试
+                                    isConnecting = false
+                                    Log.e("DeviceScan", "Connection failed, please try again")
+                                }
+                            }
+                            connect()
                         }
-                        setResult(Activity.RESULT_OK, resultIntent)
-                        finish()
                     },
                     onScanClicked = {
                         if (isScanning) stopBleScan() else checkPermissionsAndScan()
@@ -146,6 +186,8 @@ class DeviceScanActivity : ComponentActivity() {
 fun DeviceScanScreen(
     isScanning: Boolean,
     scanResults: List<ScanResult>,
+    isConnecting: Boolean = false,
+    connectedDevice: String? = null,
     onDeviceSelected: (String) -> Unit,
     onScanClicked: () -> Unit
 ) {
@@ -161,9 +203,33 @@ fun DeviceScanScreen(
             )
         }
     ) { paddingValues ->
-        LazyColumn(modifier = Modifier.padding(paddingValues)) {
-            items(scanResults.sortedByDescending { it.rssi }) { result ->
-                DeviceItem(result = result, onDeviceSelected = onDeviceSelected)
+        Column(modifier = Modifier.padding(paddingValues)) {
+            // 显示连接状态
+            if (isConnecting) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Text(
+                            text = "正在连接${connectedDevice ?: ""}...",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+                }
+            }
+            
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(scanResults.sortedByDescending { it.rssi }) { result ->
+                    DeviceItem(result = result, onDeviceSelected = onDeviceSelected)
+                }
             }
         }
     }
