@@ -401,9 +401,23 @@ class GeckoActivity : ComponentActivity() {
                 }
 
                 Log.d("SYNC", "Canvas 抓取成功，尺寸: ${bitmap.width}x${bitmap.height}")
-                renderHistory.add(bitmap)
+                
+                // 2.5. 绘制检测框到图像上（用于预览调试）
+                val boxedBitmap = withContext(Dispatchers.Default) {
+                    OcrHelper.drawDetectionBoxes(bitmap)
+                }
+                Log.d("SYNC", "已在图像上绘制检测框")
+                
+                // 2.6. 对图像进行二值化处理（二值化后再用于识别）
+                val binarizedBitmap = withContext(Dispatchers.Default) {
+                    OcrHelper.binarizeBitmap(bitmap)
+                }
+                Log.d("SYNC", "图像二值化完成")
+                
+                // 添加带框的原始图像到历史（用于预览）
+                renderHistory.add(boxedBitmap)
 
-                // 3. 渲染并发送到 BLE 设备（如果已连接）
+                // 3. 渲染并发送到 BLE 设备（如果已连接）- 使用原始 bitmap
                 val renderResult = DomLayoutRenderer.renderTo1bpp48k(bitmap)
                 Log.d("SYNC", "渲染完成: ${renderResult.debugStats}")
                 
@@ -422,13 +436,13 @@ class GeckoActivity : ComponentActivity() {
                 }
                 lastStatus = "同步成功: 第 $pageNum 页"
 
-                // 4. OCR 文字识别 (在后台线程执行，独立于 BLE)
+                // 4. OCR 文字识别 (在后台线程执行，独立于 BLE) - 使用二值化后的图像
                 Log.d("SYNC", "开始 OCR 识别...")
                 isRecognizing = true
 
                 withContext(Dispatchers.Default) {
                     try {
-                        val ocr = OcrHelper.recognizeText(bitmap)
+                        val ocr = OcrHelper.recognizeText(binarizedBitmap)
                         Log.d("SYNC", "OCR 识别完成: ${ocr.blocks.size} 段落")
 
                         withContext(Dispatchers.Main) {

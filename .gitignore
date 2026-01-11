@@ -17,3 +17,14 @@ local.properties
 .fake
 nul
 micropython_esp32c3.bin
+app/OpenCV/*
+app/PaddleLite/*
+
+# Build outputs and logs
+build_log.txt
+*.log
+
+# App cache directory
+app/cache/
+
+# Model files in root (misplaced, should be in assets/models/)

@@ -19,7 +19,8 @@ class PaddleOcrPredictor(
     private val recModelPath: String,
     private val clsModelPath: String,
     private val wordLabels: List<String> = emptyList(),
-    private val cpuThreadNum: Int = 4
+    private val cpuThreadNum: Int = 4,
+    private val safeMode: Boolean = false
 ) {
     
     private val TAG = "PaddleOcrPredictor"
@@ -28,8 +29,8 @@ class PaddleOcrPredictor(
     private var recPredictor: PaddlePredictor? = null
     private var clsPredictor: PaddlePredictor? = null
     
-    // 模型期望的输入尺寸（默认为 PP-OCRv3 识别的 48x320）
-    private var recExpectedHeight = 48
+    // 模型期望的输入尺寸（PP-OCRv3 识别使用 32x320）
+    private var recExpectedHeight = 32
     private var recExpectedWidth = 320
 
     init {
@@ -113,6 +114,158 @@ class PaddleOcrPredictor(
     }
     
     /**
+     * 对图像应用 Otsu 二值化，返回黑白图像（用于预览）
+     */
+    fun applyBinarization(bitmap: Bitmap): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        
+        // 提取像素并灰度化
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        
+        val grayPixels = IntArray(width * height)
+        var minGray = 255
+        var maxGray = 0
+        var sumGray = 0L
+        
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
+            val gray = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+            grayPixels[i] = gray
+            minGray = minOf(minGray, gray)
+            maxGray = maxOf(maxGray, gray)
+            sumGray += gray
+        }
+        
+        val avgGray = sumGray / grayPixels.size
+        Log.d(TAG, "灰度统计: min=$minGray, max=$maxGray, avg=$avgGray")
+        
+        // Otsu 自动阈值计算
+        val histogram = IntArray(256)
+        for (gray in grayPixels) {
+            histogram[gray]++
+        }
+        
+        val total = width * height
+        var sum = 0.0
+        for (i in 0 until 256) {
+            sum += i * histogram[i]
+        }
+        
+        var sumB = 0.0
+        var wB = 0
+        var maxVariance = 0.0
+        var otsuThreshold = 128
+        
+        for (t in 0 until 256) {
+            wB += histogram[t]
+            if (wB == 0) continue
+            
+            val wF = total - wB
+            if (wF == 0) break
+            
+            sumB += t * histogram[t]
+            val mB = sumB / wB
+            val mF = (sum - sumB) / wF
+            
+            val variance = wB.toDouble() * wF * (mB - mF) * (mB - mF)
+            
+            if (variance > maxVariance) {
+                maxVariance = variance
+                otsuThreshold = t
+            }
+        }
+        
+        Log.d(TAG, "Otsu 阈值: $otsuThreshold")
+        
+        // 判断是深色背景还是浅色背景
+        // 如果平均灰度 < 128，说明是深色背景（黑底白字），需要反转
+        val isDarkBackground = avgGray < 128
+        Log.d(TAG, "背景类型: ${if (isDarkBackground) "深色背景(黑底白字)" else "浅色背景(黑底白字)"}")
+        
+        // 应用二值化 - 使用批量设置提高性能
+        val binaryPixels = IntArray(width * height)
+        var blackCount = 0
+        var whiteCount = 0
+        
+        for (i in grayPixels.indices) {
+            val gray = grayPixels[i]
+            
+            // 根据背景类型调整二值化策略
+            val binaryValue = if (isDarkBackground) {
+                // 深色背景：高于阈值的是文字(白色)，低于的是背景(黑色)
+                // 但为了OCR识别，我们需要反转：让文字显示为黑色
+                if (gray > otsuThreshold) 0 else 255
+            } else {
+                // 浅色背景：低于阈值的是文字(黑色)，高于的是背景(白色)
+                if (gray < otsuThreshold) 0 else 255
+            }
+            
+            binaryPixels[i] = (0xFF shl 24) or (binaryValue shl 16) or (binaryValue shl 8) or binaryValue
+            
+            if (binaryValue == 0) blackCount++ else whiteCount++
+        }
+        
+        Log.d(TAG, "二值化结果: 黑色像素=$blackCount, 白色像素=$whiteCount")
+        
+        val binaryBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        binaryBitmap.setPixels(binaryPixels, 0, width, 0, 0, width, height)
+        
+        return binaryBitmap
+    }
+    
+    /**
+     * 在图像上绘制检测框（用于调试可视化）
+     */
+    fun drawDetectionBoxes(bitmap: Bitmap): Bitmap {
+        try {
+            val detBoxes = detectText(bitmap, 960)
+            Log.d(TAG, "绘制 ${detBoxes.size} 个检测框")
+            
+            // 创建可绘制的副本
+            val config = bitmap.config ?: Bitmap.Config.ARGB_8888
+            val result = bitmap.copy(config, true)
+            val canvas = android.graphics.Canvas(result)
+            val paint = android.graphics.Paint().apply {
+                style = android.graphics.Paint.Style.STROKE
+                strokeWidth = 3f
+                color = android.graphics.Color.RED
+            }
+            
+            for ((index, box) in detBoxes.withIndex()) {
+                // 绘制四边形框
+                if (box.size >= 4) {
+                    val path = android.graphics.Path()
+                    path.moveTo(box[0].x.toFloat(), box[0].y.toFloat())
+                    for (i in 1 until box.size) {
+                        path.lineTo(box[i].x.toFloat(), box[i].y.toFloat())
+                    }
+                    path.close()
+                    canvas.drawPath(path, paint)
+                }
+                
+                // 绘制索引号
+                val textPaint = android.graphics.Paint().apply {
+                    color = android.graphics.Color.YELLOW
+                    textSize = 24f
+                }
+                if (box.isNotEmpty()) {
+                    canvas.drawText("$index", box[0].x.toFloat(), (box[0].y - 10).toFloat(), textPaint)
+                }
+            }
+            
+            return result
+        } catch (e: Exception) {
+            Log.e(TAG, "绘制检测框失败", e)
+            return bitmap
+        }
+    }
+    
+    /**
      * 执行 OCR 识别
      */
     fun runImage(
@@ -147,6 +300,14 @@ class PaddleOcrPredictor(
                     for (point in box) {
                         result.addPoints(point.x, point.y)
                     }
+                    
+                    // 调试：打印检测框坐标
+                    val boxCoords = box.map { "(${it.x},${it.y})" }.joinToString(" ")
+                    val minX = box.minOf { it.x }
+                    val maxX = box.maxOf { it.x }
+                    val minY = box.minOf { it.y }
+                    val maxY = box.maxOf { it.y }
+                    Log.d(TAG, "文本框 $index: 四边形[$boxCoords], 矩形范围: (${minX},${minY})-(${maxX},${maxY}), 尺寸: ${maxX-minX}x${maxY-minY}")
                     
                     val cropped = cropBox(bitmap, box)
                     
@@ -221,85 +382,175 @@ class PaddleOcrPredictor(
     
     /**
      * 文本识别
-     * 
+     *
      * 官方方案：严格遵循 PP-OCRv3 识别模型要求
-     * - 高度固定为 48（PP-OCRv3 的硬性要求）
-     * - 宽度按比例缩放，保持宽高比
-     * - 直接提取像素，让 Paddle-Lite JNI 处理 normalization
+     * - 高度固定为 32（PP-OCRv3 的硬性要求，官方 REC_IMAGE_SHAPE = {3, 32, 320}）
+     * - 宽度根据宽高比动态计算：imgW = int(32 * wh_ratio)，并限制最大值为 320
+     * - 直接提取像素，使用官方的归一化方式：(pixel / 255.0 - 0.5) * 2.0
      */
     private fun recognizeText(bitmap: Bitmap): Pair<String, Float> {
         if (recPredictor == null) {
+            Log.w(TAG, "⚠️  识别模型未加载")
             return Pair("", 0f)
         }
-        
+
         try {
-            Log.d(TAG, "识别输入: 原始图像 ${bitmap.width}x${bitmap.height}")
-            
-            // 使用模型期望的输入尺寸（高度固定为 recExpectedHeight，宽度 padding 到 recExpectedWidth）
-            val targetHeight = recExpectedHeight
-            val targetWidth = recExpectedWidth
+            Log.d(TAG, "【识别输入】原始图像: ${bitmap.width}x${bitmap.height}")
 
-            // 步骤 1: 计算按比例缩放后的宽度
-            val ratio = bitmap.width.toFloat() / bitmap.height
-            var scaledWidth = (targetHeight * ratio).toInt().coerceAtMost(targetWidth).coerceAtLeast(10)
-            
-            // 步骤 2: Resize 到 scaledWidth x targetHeight
-            val resizedBitmap = Bitmap.createScaledBitmap(bitmap, scaledWidth, targetHeight, true)
-            
-            // 步骤 3: 创建目标 bitmap（targetWidth x targetHeight），右侧填充黑色
-            val paddedBitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-            val canvas = android.graphics.Canvas(paddedBitmap)
-            canvas.drawColor(android.graphics.Color.BLACK)
-            canvas.drawBitmap(resizedBitmap, 0f, 0f, null)
+            // 官方实现：根据宽高比动态计算目标宽度
+            val targetHeight = recExpectedHeight  // 32
+            val whRatio = bitmap.width.toFloat() / bitmap.height
 
-            Log.d(TAG, "缩放并 padding: ${scaledWidth}x${targetHeight} → ${targetWidth}x${targetHeight}")
-            
-            // 步骤 4: 提取像素
+            // 计算目标宽度：imgW = int(32 * wh_ratio)，限制在 [8, 320] 并对齐到 8 的倍数
+            var targetWidth = (targetHeight * whRatio).toInt()
+            targetWidth = max(8, min(320, targetWidth))
+            targetWidth = ((targetWidth + 7) / 8) * 8
+
+            if (safeMode) {
+                // 临时兼容策略：为避免 FC 维度 4800/1320!==120 的崩溃，强制使用最小安全宽度 8
+                // 说明：当前使用的识别模型与运行时不匹配，Lite 内部 FC 期望 K=120，但输入被当作 T*120 展平。
+                // 使用 8 宽可令 T=1，从而 K=120，避免崩溃。替换为 PP-OCRv2 rec 模型后会自动恢复动态宽度。
+                targetWidth = 8
+                Log.w(TAG, "识别 SAFE 模式启用：强制使用 8x32 输入（等待更换识别模型）")
+            }
+
+            // 步骤 1: 直接 resize 到目标尺寸（不需要 padding，直接用动态宽度）
+            val resizedBitmap = Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
+
+            // 步骤 2: 提取像素并二值化增强（提升低对比度文字识别率）
             val pixels = IntArray(targetWidth * targetHeight)
-            paddedBitmap.getPixels(pixels, 0, targetWidth, 0, 0, targetWidth, targetHeight)
+            resizedBitmap.getPixels(pixels, 0, targetWidth, 0, 0, targetWidth, targetHeight)
             
-            // 步骤 5: 转换为 [1, 3, targetHeight, targetWidth] 的 float 数组（归一化到 [-1, 1]，CHW）
-            val inputData = FloatArray(3 * targetHeight * targetWidth)
-            for (y in 0 until targetHeight) {
-                for (x in 0 until targetWidth) {
-                    val pixel = pixels[y * targetWidth + x]
-                    val r = ((pixel shr 16) and 0xFF).toFloat()
-                    val g = ((pixel shr 8) and 0xFF).toFloat()
-                    val b = (pixel and 0xFF).toFloat()
-                    
-                    val baseIdx = y * targetWidth + x
-                    inputData[0 * targetHeight * targetWidth + baseIdx] = r / 127.5f - 1f
-                    inputData[1 * targetHeight * targetWidth + baseIdx] = g / 127.5f - 1f
-                    inputData[2 * targetHeight * targetWidth + baseIdx] = b / 127.5f - 1f
+            // 二值化预处理：灰度化 + Otsu 全局阈值
+            val grayPixels = IntArray(targetWidth * targetHeight)
+            var sumGray = 0L
+            for (i in pixels.indices) {
+                val pixel = pixels[i]
+                val r = (pixel shr 16) and 0xFF
+                val g = (pixel shr 8) and 0xFF
+                val b = pixel and 0xFF
+                // 加权灰度化 (与 OpenCV GRAY 一致)
+                val gray = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+                grayPixels[i] = gray
+                sumGray += gray
+            }
+            
+            val avgGray = sumGray / grayPixels.size
+            val isDarkBackground = avgGray < 128
+            
+            // Otsu 自动阈值计算：找到最佳阈值使类间方差最大
+            val histogram = IntArray(256)
+            for (gray in grayPixels) {
+                histogram[gray]++
+            }
+            
+            val total = targetWidth * targetHeight
+            var sum = 0.0
+            for (i in 0 until 256) {
+                sum += i * histogram[i]
+            }
+            
+            var sumB = 0.0
+            var wB = 0
+            var wF = 0
+            var maxVariance = 0.0
+            var otsuThreshold = 128
+            
+            for (t in 0 until 256) {
+                wB += histogram[t]
+                if (wB == 0) continue
+                
+                wF = total - wB
+                if (wF == 0) break
+                
+                sumB += t * histogram[t]
+                val mB = sumB / wB
+                val mF = (sum - sumB) / wF
+                
+                // 类间方差
+                val variance = wB.toDouble() * wF * (mB - mF) * (mB - mF)
+                
+                if (variance > maxVariance) {
+                    maxVariance = variance
+                    otsuThreshold = t
                 }
             }
             
+            // 应用 Otsu 阈值进行二值化：纯黑白图像
+            val binaryPixels = IntArray(targetWidth * targetHeight)
+            for (i in grayPixels.indices) {
+                // 根据背景类型调整策略
+                binaryPixels[i] = if (isDarkBackground) {
+                    // 深色背景：反转，让浅色文字变成黑色
+                    if (grayPixels[i] > otsuThreshold) 0 else 255
+                } else {
+                    // 浅色背景：保持，让深色文字变成黑色
+                    if (grayPixels[i] < otsuThreshold) 0 else 255
+                }
+            }
+            
+            Log.d(TAG, "Otsu 二值化完成，阈值: $otsuThreshold, 背景: ${if (isDarkBackground) "深色" else "浅色"}")
+
+            // 步骤 3: 转换为 [1, 3, targetHeight, targetWidth] 的 float 数组
+            // 使用二值化后的像素，BGR 三通道使用相同值（灰度图）
+            val inputData = FloatArray(3 * targetHeight * targetWidth)
+            for (y in 0 until targetHeight) {
+                for (x in 0 until targetWidth) {
+                    val baseIdx = y * targetWidth + x
+                    val binaryValue = binaryPixels[baseIdx].toFloat() / 255.0f
+                    val normalizedValue = (binaryValue - 0.5f) * 2.0f  // 归一化到 [-1, 1]
+                    
+                    // BGR 三通道使用相同的二值化值
+                    inputData[0 * targetHeight * targetWidth + baseIdx] = normalizedValue
+                    inputData[1 * targetHeight * targetWidth + baseIdx] = normalizedValue
+                    inputData[2 * targetHeight * targetWidth + baseIdx] = normalizedValue
+                }
+            }
+
             resizedBitmap.recycle()
-            paddedBitmap.recycle()
-            
+
             val inputTensor = recPredictor!!.getInput(0)
-            
-            // 设置输入形状为 [1, 3, targetHeight, targetWidth]
+
+            // 【关键】设置输入形状为 [1, 3, targetHeight, targetWidth]
             inputTensor.resize(longArrayOf(1, 3, targetHeight.toLong(), targetWidth.toLong()))
+
+            Log.d(TAG, "✓ 输入形状已设置: [1, 3, $targetHeight, $targetWidth]")
             
-            Log.d(TAG, "输入形状已设置: [1, 3, $targetHeight, $targetWidth]")
-            
+            // 验证输入数据大小
+            val expectedDataSize = 3 * targetHeight * targetWidth
+            if (inputData.size != expectedDataSize) {
+                Log.e(TAG, "❌ 输入数据大小不匹配! 期望: $expectedDataSize, 实际: ${inputData.size}")
+                return Pair("", 0f)
+            }
+            Log.d(TAG, "✓ 输入数据大小验证通过: ${inputData.size}")
+
             // 设置数据并推理
-            inputTensor.setData(inputData)
-            recPredictor!!.run()
-            
+            try {
+                inputTensor.setData(inputData)
+                Log.d(TAG, "✓ 输入数据已设置到张量")
+                
+                Log.d(TAG, "开始推理...")
+                recPredictor!!.run()
+                Log.d(TAG, "✓ 推理完成成功")
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ 推理执行失败! 错误: ${e.message}", e)
+                Log.e(TAG, "这通常表示模型与库版本不兼容，或模型文件损坏")
+                Log.e(TAG, "请检查: app/src/main/assets/models/ch_PP-OCRv3_rec_slim_opt.nb")
+                throw e
+            }
+
             // 获取输出
             val outputTensor = recPredictor!!.getOutput(0)
             val outputShape = outputTensor.shape()
             val outputData = outputTensor.getFloatData()
-            
-            Log.d(TAG, "识别输出形状: [${outputShape.joinToString(", ")}], 数据长度: ${outputData.size}")
-            
+
+            Log.d(TAG, "✓ 识别输出形状: [${outputShape.joinToString(", ")}], 数据长度: ${outputData.size}")
+
             val (text, conf) = postprocessRecognition(outputData, outputShape)
             return Pair(text, conf)
-            
+
         } catch (e: Exception) {
-            Log.e(TAG, "文本识别失败", e)
+            Log.e(TAG, "❌ 文本识别失败: ${e.message}", e)
             e.printStackTrace()
             return Pair("", 0f)
         }
@@ -427,9 +678,21 @@ class PaddleOcrPredictor(
             maxY = max(maxY, point.y)
         }
         
+        // 确保不超出图像边界
+        minX = max(0, minX)
+        minY = max(0, minY)
+        maxX = min(bitmap.width - 1, maxX)
+        maxY = min(bitmap.height - 1, maxY)
+        
         val width = maxX - minX
         val height = maxY - minY
         
+        if (width <= 0 || height <= 0) {
+            Log.e(TAG, "❌ 检测框无效: width=$width, height=$height")
+            return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        }
+        
+        Log.d(TAG, "✓ 裁剪框: ($minX, $minY) - ($maxX, $maxY), 尺寸: ${width}x${height}")
         return Bitmap.createBitmap(bitmap, minX, minY, width, height)
     }
     
@@ -465,14 +728,17 @@ class PaddleOcrPredictor(
             mask[i] = output[i] > threshold
         }
         
+        // 对mask进行膨胀（dilate）操作来扩大文字区域，防止边界过紧
+        val dilatedMask = dilate(mask, h, w, iterations = 2)
+        
         // 简单的连通分量标记
         val visited = BooleanArray(h * w)
         val directions = arrayOf(
             Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1)
         )
         
-        for (idx in mask.indices) {
-            if (!mask[idx] || visited[idx]) continue
+        for (idx in dilatedMask.indices) {
+            if (!dilatedMask[idx] || visited[idx]) continue
             
             val y = idx / w
             val x = idx % w
@@ -516,6 +782,42 @@ class PaddleOcrPredictor(
         }
         
         return boxes
+    }
+    
+    /**
+     * 膨胀操作（Dilate）：扩大二值图像中的白色区域
+     * 用于扩展文字检测框，防止边界过紧导致文字被截断
+     */
+    private fun dilate(mask: BooleanArray, h: Int, w: Int, iterations: Int = 1): BooleanArray {
+        var result = mask.copyOf()
+        for (iter in 0 until iterations) {
+            val temp = BooleanArray(h * w)
+            val directions = arrayOf(
+                Pair(-1, -1), Pair(-1, 0), Pair(-1, 1),
+                Pair(0, -1),               Pair(0, 1),
+                Pair(1, -1),  Pair(1, 0), Pair(1, 1)
+            )
+            
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    var dilated = false
+                    for ((dy, dx) in directions) {
+                        val ny = y + dy
+                        val nx = x + dx
+                        if (ny in 0 until h && nx in 0 until w) {
+                            val idx = ny * w + nx
+                            if (result[idx]) {
+                                dilated = true
+                                break
+                            }
+                        }
+                    }
+                    temp[y * w + x] = dilated || result[y * w + x]
+                }
+            }
+            result = temp
+        }
+        return result
     }
     
     /**
@@ -565,33 +867,52 @@ class PaddleOcrPredictor(
         
         Log.d(TAG, "CRNN 输出形状: [${shape.joinToString(", ")}], 数据长度: ${output.size}, 字典大小: ${wordLabels.size}")
         
-        // 自动推断维度
-        val numClasses = wordLabels.size
-        val dataSize = output.size
+        // 解析输出维度：支持 [batch, seq_len, num_classes] 或 [seq_len, num_classes]
+        val batch: Int
         val seqLen: Int
+        val numClasses: Int
         
-        // 根据数据大小计算序列长度
-        // 如果 data = seqLen * numClasses，则推断出 seqLen
-        if (dataSize % numClasses == 0) {
-            seqLen = dataSize / numClasses
-            Log.d(TAG, "推断格式: [seq_len=$seqLen, num_classes=$numClasses]")
-        } else {
-            Log.e(TAG, "无法推断维度: data_size=$dataSize, num_classes=$numClasses")
+        when (shape.size) {
+            3 -> {
+                // 格式: [batch, seq_len, num_classes]
+                batch = shape[0].toInt()
+                seqLen = shape[1].toInt()
+                numClasses = shape[2].toInt()
+                Log.d(TAG, "3D 输出格式: batch=$batch, seq_len=$seqLen, num_classes=$numClasses")
+            }
+            2 -> {
+                // 格式: [seq_len, num_classes]
+                batch = 1
+                seqLen = shape[0].toInt()
+                numClasses = shape[1].toInt()
+                Log.d(TAG, "2D 输出格式: seq_len=$seqLen, num_classes=$numClasses")
+            }
+            else -> {
+                Log.e(TAG, "不支持的输出维度: ${shape.size}")
+                return Pair("", 0.5f)
+            }
+        }
+        
+        // 验证数据大小
+        val expectedSize = batch * seqLen * numClasses
+        if (output.size != expectedSize) {
+            Log.e(TAG, "数据大小不匹配: 期望=$expectedSize, 实际=${output.size}")
             return Pair("", 0.5f)
         }
         
-        // 简单的贪心 CTC 解码
-        // 假设输出格式为 [seq_len, num_classes]（最常见的格式）
+        // CTC 贪心解码 (只处理第一个 batch)
         val result = StringBuilder()
         var sumConf = 0f
         var prevClass = -1
         var count = 0
+        var blankCount = 0
         
         for (t in 0 until seqLen) {
             var maxVal = Float.NEGATIVE_INFINITY
             var maxIdx = 0
             
             // 找出该时间步最大的 logit
+            // 索引计算: [batch=0, time=t, class=c] -> (0 * seqLen * numClasses) + (t * numClasses) + c
             for (c in 0 until numClasses) {
                 val idx = t * numClasses + c
                 if (idx < output.size && output[idx] > maxVal) {
@@ -602,13 +923,21 @@ class PaddleOcrPredictor(
             
             // CTC 解码：
             // 1. 去重（相邻相同字符只保留一个）
-            // 2. 忽略空白符（通常是最后一个类，索引为 numClasses-1）
-            if (maxIdx != prevClass && maxIdx < numClasses - 1) {
-                val char = wordLabels.getOrNull(maxIdx)
-                if (char != null && char.isNotBlank()) {
-                    result.append(char)
-                    sumConf += maxVal
-                    count++
+            // 2. 忽略 blank 标记（通常是 wordLabels.size 即 6622）
+            // 3. 超出字典范围的索引视为特殊标记（unknown/padding）
+            if (maxIdx != prevClass) {
+                if (maxIdx >= 0 && maxIdx < wordLabels.size) {
+                    // 正常字符：在字典范围内
+                    val char = wordLabels.getOrNull(maxIdx)
+                    if (char != null && char.isNotBlank()) {
+                        result.append(char)
+                        sumConf += maxVal
+                        count++
+                    }
+                } else if (maxIdx >= wordLabels.size) {
+                    // 特殊标记：blank (6622) / unknown (6623) / padding (6624)
+                    // 跳过这些标记，不添加字符，但记录 blank 出现次数
+                    blankCount++
                 }
             }
             prevClass = maxIdx
@@ -624,7 +953,7 @@ class PaddleOcrPredictor(
         }
         
         val text = result.toString()
-        Log.d(TAG, "识别结果: '$text' (置信度: $avgConf)")
+        Log.d(TAG, "识别结果: '$text' (置信度: $avgConf, 字符数: $count, blank数: $blankCount)")
         
         return Pair(text, avgConf)
     }
