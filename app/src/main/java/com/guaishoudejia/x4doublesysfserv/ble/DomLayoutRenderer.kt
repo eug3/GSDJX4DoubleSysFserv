@@ -99,6 +99,31 @@ object DomLayoutRenderer {
         )
     }
 
+    /**
+     * 直接根据 Bitmap 渲染页面（用于 Canvas 截图场景）。
+     */
+    fun renderTo1bpp48k(bitmap: Bitmap): RenderResult {
+        // 缩放 bitmap 到逻辑分辨率 480x800（与 packLogicalBitmapToDevicePhysical1bpp 匹配）
+        val scaledBitmap = Bitmap.createBitmap(LOGICAL_W, LOGICAL_H, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(scaledBitmap)
+        canvas.drawColor(Color.WHITE)
+
+        // 缩放原图到目标尺寸
+        val srcRect = android.graphics.Rect(0, 0, bitmap.width, bitmap.height)
+        val dstRect = android.graphics.Rect(0, 0, LOGICAL_W, LOGICAL_H)
+        canvas.drawBitmap(bitmap, srcRect, dstRect, null)
+
+        val packed = packLogicalBitmapToDevicePhysical1bpp(scaledBitmap)
+        val out48k = ByteArray(PAGE_SIZE_BYTES)
+        System.arraycopy(packed, 0, out48k, 0, packed.size)
+
+        return RenderResult(
+            pageBytes48k = out48k,
+            previewBitmap = scaledBitmap,
+            debugStats = "bitmap src=${bitmap.width}x${bitmap.height} -> ${LOGICAL_W}x${LOGICAL_H}",
+        )
+    }
+
     private fun parseCssPx(s: String, fallback: Float): Float {
         val t = s.trim().lowercase()
         return when {

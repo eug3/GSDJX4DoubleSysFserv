@@ -2,16 +2,31 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.BLUETOOTH" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- 基本网络权限 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- 传统蓝牙权限 (API 30 及以下) -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+
+    <!-- Android 12+ 蓝牙权限 (API 31+) -->
+    <!-- 声明 neverForLocation 表示应用不通过蓝牙进行地理定位，有助于提高隐私合规性 -->
+    <uses-permission 
+        android:name="android.permission.BLUETOOTH_SCAN" 
+        android:usesPermissionFlags="neverForLocation" 
+        tools:targetApi="s" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+
+    <!-- 位置权限 (某些 BLE 扫描场景仍需，特别是在旧版本 Android 上) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
 
     <application
+        android:name=".X4Application"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -28,16 +43,17 @@
             android:theme="@style/Theme.GSDJX4DoubleSysFserv">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
         <activity
             android:name=".DeviceScanActivity"
+            android:label="扫描设备"
             android:theme="@style/Theme.GSDJX4DoubleSysFserv" />
         <activity
             android:name=".GeckoActivity"
             android:exported="false"
+            android:label="阅读器"
             android:theme="@style/Theme.GSDJX4DoubleSysFserv" />
     </application>
 

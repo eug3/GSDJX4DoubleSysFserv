@@ -6,18 +6,22 @@ plugins {
 
 android {
     namespace = "com.guaishoudejia.x4doublesysfserv"
-    compileSdk {
-        version = release(36)
-    }
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.guaishoudejia.x4doublesysfserv"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        
+        // 关键：同时支持 32 位 (v7a) 和 64 位 (v8a) 架构
+        ndk {
+            abiFilters.add("arm64-v8a")
+            abiFilters.add("armeabi-v7a")
+        }
     }
 
     buildTypes {
@@ -30,18 +34,18 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions {
-        jvmTarget = "21"
+        jvmTarget = "17"
     }
     buildFeatures {
         compose = true
     }
     packaging {
         jniLibs {
-            // 与 AndroidManifest 的 extractNativeLibs 保持一致，确保 16KB 设备兼容
+            // 对于包含 JNI 库的应用，建议开启此项
             useLegacyPackaging = true
         }
     }
@@ -56,9 +60,15 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    // Compose Material icons (extended set for Bluetooth icon)
+    implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.okhttp)
     implementation("androidx.browser:browser:1.8.0")
     implementation("org.mozilla.geckoview:geckoview:115.0.20230706202047")
+    
+    // PaddleOCR - Paddle-Lite v2.10
+    implementation(files("libs/PaddlePredictor.jar"))
+    
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

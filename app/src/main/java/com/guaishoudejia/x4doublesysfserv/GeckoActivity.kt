@@ -1,8 +1,10 @@
 package com.guaishoudejia.x4doublesysfserv
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.os.PowerManager
@@ -11,7 +13,9 @@ import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -22,6 +26,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -47,6 +52,10 @@ import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
 import com.guaishoudejia.x4doublesysfserv.ble.DomLayoutRenderer
+import com.guaishoudejia.x4doublesysfserv.ocr.OcrHelper
+import com.guaishoudejia.x4doublesysfserv.ocr.OcrResult
+import com.guaishoudejia.x4doublesysfserv.ui.components.BleDeviceScanSheet
+import com.guaishoudejia.x4doublesysfserv.ui.components.BleFloatingButton
 import kotlin.coroutines.resume
 
 class GeckoActivity : ComponentActivity() {
@@ -55,28 +64,47 @@ class GeckoActivity : ComponentActivity() {
     private var geckoView: GeckoView? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var bleEspClient: BleEspClient? = null
+    private lateinit var bleConnectionManager: BleConnectionManager
+    private var pendingStartScan = false
+    private val blePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions.values.all { it }
+        if (granted && pendingStartScan) startScanAndShow()
+        pendingStartScan = false
+    }
     
-    // ================= 类成员状态：确保逻辑与 UI 共享 =================
+    // ================= 核心状态变量 =================
     private var currentUrl by mutableStateOf("")
     private var isEbookMode by mutableStateOf(false)
     private var isLoading by mutableStateOf(false)
-    private var lastStatus by mutableStateOf("")
+    private var lastStatus by mutableStateOf("就绪")
     private var logicalPageIndex by mutableIntStateOf(0)
     private val renderHistory = mutableStateListOf<Bitmap>()
+
+    // OCR 状态
+    private var isRecognizing by mutableStateOf(false)
+    private var ocrResult by mutableStateOf<OcrResult?>(null)
+    private var ocrError by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val targetUrl = intent.getStringExtra(EXTRA_URL).orEmpty().ifBlank { DEFAULT_URL }
         currentUrl = targetUrl
-        val targetDeviceAddress = intent.getStringExtra(EXTRA_DEVICE_ADDRESS).orEmpty().ifBlank { null }
 
-        val settings = GeckoSessionSettings.Builder()
-            .usePrivateMode(false)
-            .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP)
-            .build()
+        // 初始化 BLE 连接管理器
+        bleConnectionManager = BleConnectionManager(this, this, lifecycleScope)
+
+        // OCR 已在 X4Application 启动时初始化，此处无需再次初始化
+        Log.d("GeckoActivity", "OCR 初始化已在应用启动时完成")
 
         runtime = GeckoRuntime.create(this)
+        val settings = GeckoSessionSettings.Builder()
+            .usePrivateMode(false)
+            .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP) // 统一为桌面模式
+            .build()
+
         session = GeckoSession(settings).apply {
             open(runtime!!)
         }
@@ -84,6 +112,7 @@ class GeckoActivity : ComponentActivity() {
         setContent {
             var fullScreenBitmap by remember { mutableStateOf<Bitmap?>(null) }
             val scope = rememberCoroutineScope()
+            var isPanelExpanded by remember { mutableStateOf(false) }
 
             val density = androidx.compose.ui.platform.LocalDensity.current
             val metrics = androidx.compose.ui.platform.LocalContext.current.resources.displayMetrics
@@ -93,10 +122,12 @@ class GeckoActivity : ComponentActivity() {
             val wDp = with(density) { wPx.toDp() }
             val hDp = with(density) { hPx.toDp() }
 
-            // 监听 URL 变化
+            // 监听有效 URL 变化
             DisposableEffect(session) {
                 val delegate = object : GeckoSession.ProgressDelegate {
-                    override fun onPageStart(session: GeckoSession, url: String) { currentUrl = url }
+                    override fun onPageStart(session: GeckoSession, url: String) { 
+                        if (!url.startsWith("x4bmp://")) currentUrl = url 
+                    }
                     override fun onPageStop(session: GeckoSession, success: Boolean) {}
                     override fun onProgressChange(session: GeckoSession, progress: Int) {}
                     override fun onSecurityChange(session: GeckoSession, info: GeckoSession.ProgressDelegate.SecurityInformation) {}
@@ -116,39 +147,60 @@ class GeckoActivity : ComponentActivity() {
                     }
                 )
 
-                if (currentUrl.contains("weread.qq.com/web/reader/") && !isEbookMode) {
-                    Button(
-                        onClick = {
-                            isEbookMode = true
-                            acquireWakeLock()
-                            if (targetDeviceAddress != null && bleEspClient == null) {
-                                bleEspClient = BleEspClient(
-                                    context = this@GeckoActivity,
-                                    deviceAddress = targetDeviceAddress,
-                                    scope = scope,
-                                    onCommand = { cmd ->
-                                        if (cmd.startsWith("PAGE:")) {
-                                            cmd.substringAfter("PAGE:").toIntOrNull()?.let { 
-                                                performRenderRequest(it) 
-                                            }
-                                        }
-                                    }
-                                ).apply { connect() }
-                            }
-                            performRenderRequest(logicalPageIndex)
-                        },
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 32.dp)
-                    ) { Text("电子书阅读模式") }
+                // 自动检测阅读页并启用 Ebook 模式（不自动触发同步或扫描）
+                LaunchedEffect(currentUrl) {
+                    if (currentUrl.contains("weread.qq.com/web/reader/") && !isEbookMode) {
+                        isEbookMode = true
+                        acquireWakeLock()
+                    }
                 }
 
                 if (isEbookMode) {
+                    // 左侧：BLE 浮动按钮
+                    BleFloatingButton(
+                        isConnected = bleConnectionManager.isConnected,
+                        deviceName = bleConnectionManager.connectedDeviceName,
+                        onScan = { requestBleAndStartScan() },
+                        onForget = { bleConnectionManager.forgetDevice() },
+                        isPanelExpanded = isPanelExpanded,
+                        onTogglePanel = { isPanelExpanded = !isPanelExpanded },
+                        onRefresh = { performSync(logicalPageIndex) },
+                        onExit = {
+                            isEbookMode = false
+                            releaseWakeLock()
+                            renderHistory.clear()
+                            bleConnectionManager.disconnect()
+                        }
+                    )
+
+                    // 底部：Ebook 控制面板
                     EbookControlPanel(
-                        onRefresh = { performRenderRequest(logicalPageIndex) },
+                        isExpanded = isPanelExpanded,
+                        onToggleExpand = { isPanelExpanded = !isPanelExpanded },
+                        onRefresh = { performSync(logicalPageIndex) },
                         onPageClick = { fullScreenBitmap = it },
                         onExit = { 
                             isEbookMode = false
                             releaseWakeLock()
                             renderHistory.clear()
+                            bleConnectionManager.disconnect()
+                        }
+                    )
+
+                    // 设备扫描底表
+                    BleDeviceScanSheet(
+                        isVisible = bleConnectionManager.showScanSheet,
+                        isScanning = bleConnectionManager.isScanning,
+                        deviceList = bleConnectionManager.scannedDevices,
+                        onDeviceSelected = { address, name ->
+                            bleConnectionManager.connectToDevice(address, name) { client ->
+                                Log.d("GeckoActivity", "已连接到 BLE 设备: $name")
+                            }
+                            bleConnectionManager.showScanSheet = false
+                        },
+                        onDismiss = { 
+                            bleConnectionManager.stopScanning()
+                            bleConnectionManager.showScanSheet = false 
                         }
                     )
                 }
@@ -164,31 +216,37 @@ class GeckoActivity : ComponentActivity() {
 
     @Composable
     fun BoxScope.EbookControlPanel(
+        isExpanded: Boolean,
+        onToggleExpand: () -> Unit,
         onRefresh: () -> Unit,
         onPageClick: (Bitmap) -> Unit,
         onExit: () -> Unit
     ) {
         val pagerState = rememberPagerState(pageCount = { renderHistory.size })
-        
-        LaunchedEffect(renderHistory.size) {
-            if (renderHistory.isNotEmpty()) {
-                pagerState.animateScrollToPage(renderHistory.size - 1)
-            }
-        }
+        LaunchedEffect(renderHistory.size) { if (renderHistory.isNotEmpty()) pagerState.animateScrollToPage(renderHistory.size - 1) }
 
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-                .background(Color(0xFFF5F5F5).copy(alpha = 0.95f))
-        ) {
-            // 照片浏览器式历史预览
+        // 图片预览和 OCR 结果并排显示
+        if (isExpanded) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+                    .heightIn(max = 250.dp)
+                    .background(Color(0xFFF5F5F5).copy(alpha = 0.95f))
+                    .padding(8.dp)
+            ) {
+            // 左侧：图片预览
             if (renderHistory.isNotEmpty()) {
-                Box(modifier = Modifier.fillMaxWidth().height(200.dp).padding(vertical = 8.dp)) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(200.dp)
+                        .padding(end = 8.dp)
+                ) {
                     HorizontalPager(
                         state = pagerState,
-                        contentPadding = PaddingValues(horizontal = 64.dp),
-                        pageSpacing = 16.dp,
+                        contentPadding = PaddingValues(horizontal = 32.dp),
+                        pageSpacing = 8.dp,
                         modifier = Modifier.fillMaxSize()
                     ) { page ->
                         Image(
@@ -205,22 +263,95 @@ class GeckoActivity : ComponentActivity() {
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(8.dp), 
-                horizontalArrangement = Arrangement.SpaceBetween, 
-                verticalAlignment = Alignment.CenterVertically
+            // 右侧：OCR 识别结果
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(200.dp)
+                    .background(Color.White)
+                    .padding(8.dp)
             ) {
-                Text(text = "预览历史: ${renderHistory.size}页 | BLE: ${if (bleEspClient?.isConnected() == true) "在线" else "离线"}", fontSize = 11.sp)
-                Row {
-                    Button(onClick = onRefresh, modifier = Modifier.padding(end = 4.dp)) { Text("刷新", fontSize = 11.sp) }
-                    Button(onClick = onExit) { Text("退出", fontSize = 11.sp) }
+                // 标题栏
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "OCR 识别", fontSize = 11.sp, color = Color.Gray)
+                    if (isRecognizing) {
+                        CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // OCR 内容
+                when {
+                    isRecognizing -> {
+                        Text("正在识别...", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(vertical = 16.dp))
+                    }
+                    ocrError != null -> {
+                        Text("识别失败", fontSize = 12.sp, color = Color.Red)
+                    }
+                    ocrResult != null -> {
+                        // 统计信息
+                        Text(
+                            text = "${ocrResult!!.blocks.size} 段落",
+                            fontSize = 10.sp,
+                            color = Color.Gray
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        // 文字内容（可滚动）
+                        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                ocrResult!!.blocks.forEachIndexed { index, block ->
+                                    Text(
+                                        text = block.text,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    )
+                                    if (index < ocrResult!!.blocks.size - 1) {
+                                        HorizontalDivider(
+                                            color = Color.LightGray.copy(alpha = 0.5f),
+                                            thickness = 0.5.dp,
+                                            modifier = Modifier.padding(vertical = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else -> {
+                        Text("暂无识别结果", fontSize = 12.sp, color = Color.Gray)
+                    }
                 }
             }
-            
-            Box(modifier = Modifier.fillMaxWidth().height(40.dp).background(Color.White).padding(horizontal = 8.dp)) {
-                if (isLoading) CircularProgressIndicator(modifier = Modifier.align(Alignment.Center).size(20.dp), strokeWidth = 2.dp)
-                else Text(text = lastStatus, fontSize = 10.sp, color = Color.Gray, modifier = Modifier.align(Alignment.CenterStart))
             }
+        }
+
+        // 底部按钮栏
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.Start,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = "历史: ${renderHistory.size}页", fontSize = 11.sp)
+        }
+
+        // 状态栏
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .height(30.dp)
+                .background(Color.White)
+                .padding(horizontal = 8.dp)
+        ) {
+            if (isLoading) CircularProgressIndicator(modifier = Modifier.align(Alignment.Center).size(16.dp), strokeWidth = 2.dp)
+            else Text(text = lastStatus, fontSize = 10.sp, color = Color.Gray, modifier = Modifier.align(Alignment.CenterStart))
         }
     }
 
@@ -235,35 +366,88 @@ class GeckoActivity : ComponentActivity() {
                     offset += pan
                 }
             }) {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize().graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
-                    contentScale = ContentScale.Fit
-                )
+                Image(bitmap = bitmap.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize().graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y), contentScale = ContentScale.Fit)
                 Text("点击关闭", color = Color.White, modifier = Modifier.align(Alignment.TopCenter).padding(top = 32.dp).clickable { onClose() })
             }
         }
         BackHandler { onClose() }
     }
 
-    // ================= 辅助业务函数 (作为类成员方法，确保稳定访问) =================
+    // ================= 核心业务同步逻辑 =================
 
-    private fun performRenderRequest(pageNum: Int) {
-        lifecycleScope.launch {
+    private fun performSync(pageNum: Int) {
+        lifecycleScope.launch(Dispatchers.Main) {
             isLoading = true
+            ocrResult = null
+            ocrError = null
             try {
-                val layoutJson = gotoLogicalPage(pageNum)
-                if (!layoutJson.isNullOrEmpty()) {
-                    val render = DomLayoutRenderer.renderTo1bpp48k(layoutJson)
-                    lastStatus = "渲染成功: 第 $pageNum 页"
-                    renderHistory.add(render.previewBitmap)
-                    bleEspClient?.let { if (it.isConnected()) it.sendRawBitmap(render.pageBytes48k) }
-                } else {
-                    lastStatus = "提取 DOM 失败 (P$pageNum)"
+                // 1. 处理翻页逻辑
+                val diff = pageNum - logicalPageIndex
+                if (diff != 0) {
+                    val key = if (diff > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+                    repeat(kotlin.math.abs(diff)) { dispatchArrow(key); delay(600) }
+                    logicalPageIndex = pageNum
+                }
+
+                // 2. 注入 JS 直接截取 Canvas 像素数据 (应对 WeRead 的 Canvas 渲染)
+                Log.d("SYNC", "开始抓取 Canvas 图片")
+                val bitmap = captureCanvasViaJs()
+
+                if (bitmap == null) {
+                    Log.e("SYNC", "Canvas 抓取失败，返回 null")
+                    lastStatus = "抓取失败: 页面 Canvas 未就绪"
+                    isLoading = false
+                    return@launch
+                }
+
+                Log.d("SYNC", "Canvas 抓取成功，尺寸: ${bitmap.width}x${bitmap.height}")
+                renderHistory.add(bitmap)
+
+                // 3. 渲染并发送到 BLE 设备（如果已连接）
+                val renderResult = DomLayoutRenderer.renderTo1bpp48k(bitmap)
+                Log.d("SYNC", "渲染完成: ${renderResult.debugStats}")
+                
+                val bleClient = bleConnectionManager.getBleClient()
+                if (bleClient != null && bleConnectionManager.isConnected) {
+                    try {
+                        if (bleClient.isReady()) {
+                            bleClient.sendRawBitmap(renderResult.pageBytes48k)
+                            Log.d("SYNC", "已发送数据到 BLE 设备")
+                        } else {
+                            Log.w("SYNC", "BLE 连接未就绪，跳过发送")
+                        }
+                    } catch (e: Exception) {
+                        Log.w("SYNC", "发送 BLE 数据失败（不影响 OCR）", e)
+                    }
+                }
+                lastStatus = "同步成功: 第 $pageNum 页"
+
+                // 4. OCR 文字识别 (在后台线程执行，独立于 BLE)
+                Log.d("SYNC", "开始 OCR 识别...")
+                isRecognizing = true
+
+                withContext(Dispatchers.Default) {
+                    try {
+                        val ocr = OcrHelper.recognizeText(bitmap)
+                        Log.d("SYNC", "OCR 识别完成: ${ocr.blocks.size} 段落")
+
+                        withContext(Dispatchers.Main) {
+                            ocrResult = ocr
+                            isRecognizing = false
+                            lastStatus = "同步完成 (OCR: ${ocr.blocks.size} 段落)"
+                        }
+                    } catch (e: Exception) {
+                        Log.e("SYNC", "OCR 识别异常", e)
+                        withContext(Dispatchers.Main) {
+                            ocrError = e.message
+                            isRecognizing = false
+                            lastStatus = "同步完成 (OCR 失败)"
+                        }
+                    }
                 }
             } catch (e: Exception) {
-                lastStatus = "处理出错: ${e.message}"
+                Log.e("SYNC", "同步异常", e)
+                lastStatus = "异常: ${e.message}"
             }
             isLoading = false
         }
@@ -276,46 +460,74 @@ class GeckoActivity : ComponentActivity() {
         view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
     }
 
-    private suspend fun arrowPagerAndRefresh(keyCode: Int): String? {
-        dispatchArrow(keyCode)
-        delay(200)
-        return extractDomLayoutJson()
-    }
-
-    private suspend fun gotoLogicalPage(target: Int): String? {
-        val diff = target - logicalPageIndex
-        if (diff == 0) return extractDomLayoutJson()
-        val stepKey = if (diff > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
-        val steps = kotlin.math.abs(diff)
-        var json: String? = null
-        for (i in 0 until steps) {
-            json = arrowPagerAndRefresh(stepKey)
-            if (json.isNullOrEmpty()) break
-            logicalPageIndex += if (diff > 0) 1 else -1
-            delay(150)
+    private suspend fun captureCanvasViaJs(): Bitmap? = withContext(Dispatchers.Main) {
+        val s = session ?: run {
+            Log.e("CAPTURE", "session 为 null")
+            return@withContext null
         }
-        return json
-    }
+        Log.d("CAPTURE", "开始抓取，prevProgress=${s.progressDelegate}")
 
-    private suspend fun extractDomLayoutJson(): String? = withContext(Dispatchers.Main) {
-        val s = session ?: return@withContext null
         suspendCancellableCoroutine { cont ->
             val prevProgress = s.progressDelegate
+            Log.d("CAPTURE", "设置新的 progressDelegate")
+
             s.progressDelegate = object : GeckoSession.ProgressDelegate {
                 override fun onPageStart(session: GeckoSession, url: String) {
-                    if (url.startsWith("x4json://")) {
-                        val json = Uri.decode(url.removePrefix("x4json://"))
-                        if (!cont.isCompleted) cont.resume(json)
-                        s.progressDelegate = prevProgress
+                    Log.d("CAPTURE", "onPageStart: $url")
+                    if (url.startsWith("x4bmp://")) {
+                        try {
+                            val data = url.removePrefix("x4bmp://")
+                            Log.d("CAPTURE", "data length: ${data.length}")
+                            if (data == "ERROR") {
+                                Log.w("CAPTURE", "JS 返回 ERROR")
+                                if (!cont.isCompleted) cont.resume(null)
+                            } else {
+                                val bytes = android.util.Base64.decode(data, android.util.Base64.DEFAULT)
+                                Log.d("CAPTURE", "Base64 解码成功，bytes size: ${bytes.size}")
+                                val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                if (bmp == null) {
+                                    Log.e("CAPTURE", "BitmapFactory.decodeByteArray 返回 null")
+                                } else {
+                                    Log.d("CAPTURE", "Bitmap 解码成功: ${bmp.width}x${bmp.height}")
+                                }
+                                if (!cont.isCompleted) cont.resume(bmp)
+                            }
+                        } catch (e: Exception) {
+                            Log.e("CAPTURE", "解析异常", e)
+                            if (!cont.isCompleted) cont.resume(null)
+                        } finally {
+                            s.progressDelegate = prevProgress
+                            Log.d("CAPTURE", "恢复 prevProgress")
+                        }
                     }
                 }
                 override fun onPageStop(session: GeckoSession, success: Boolean) {}
                 override fun onProgressChange(session: GeckoSession, progress: Int) {}
                 override fun onSecurityChange(session: GeckoSession, info: GeckoSession.ProgressDelegate.SecurityInformation) {}
             }
-            val jsCode = "(function(){const elements=[];const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null);let n;while(n=walker.nextNode()){var t=n.textContent.trim();if(!t)continue;var p=n.parentElement;if(!p)continue;var cs=getComputedStyle(p);if(cs.display==='none'||cs.visibility==='hidden')continue;var r=p.getBoundingClientRect();if(r.width===0||r.height===0)continue;elements.push({text:t,x:Math.round(r.left),y:Math.round(r.top),width:Math.round(r.width),height:Math.round(r.height),fontSize:cs.fontSize,fontFamily:cs.fontFamily});}location.href='x4json://'+encodeURIComponent(JSON.stringify({viewport:{width:innerWidth,height:innerHeight},elements:elements}));})();"
+
+            // 核心脚本：自动识别微信读书的 Canvas 并截图回传
+            val jsCode = """
+                (function() {
+                    try {
+                        var canvas = document.querySelector('canvas') || document.querySelector('.readerContent_container canvas');
+                        if (!canvas) { location.href = 'x4bmp://ERROR'; return; }
+                        var data = canvas.toDataURL('image/png').split(',')[1];
+                        location.href = 'x4bmp://' + data;
+                    } catch(e) {
+                        location.href = 'x4bmp://ERROR';
+                    }
+                })();
+            """.trimIndent().replace("\n", "").replace("    ", " ")
+            Log.d("CAPTURE", "执行 JS")
             s.loadUri("javascript:$jsCode")
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // 关闭 OcrHelper 资源
+        OcrHelper.close()
     }
 
     private fun acquireWakeLock() {
@@ -328,24 +540,28 @@ class GeckoActivity : ComponentActivity() {
         wakeLock = null
     }
 
-    private fun getCharBits(char: Char): List<Int> {
-        return when (char) {
-            'P' -> listOf(0xFF, 0x81, 0x81, 0x81, 0x7F, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01)
-            'A' -> listOf(0x7E, 0x81, 0x81, 0x81, 0x7F, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81)
-            'G' -> listOf(0x7E, 0x81, 0x81, 0x01, 0x1D, 0x21, 0x41, 0x41, 0x41, 0x21, 0x3F, 0x00)
-            'E' -> listOf(0x7F, 0x41, 0x41, 0x01, 0x01, 0x1F, 0x01, 0x01, 0x01, 0x41, 0x41, 0x7F)
-            '_' -> listOf(0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x00, 0x00)
-            '0' -> listOf(0x7E, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x7E)
-            '1' -> listOf(0x00, 0x02, 0x02, 0x06, 0x06, 0x02, 0x02, 0x02, 0x02, 0x7F, 0x00, 0x00)
-            '2' -> listOf(0x7E, 0x81, 0x01, 0x01, 0x01, 0x06, 0x08, 0x10, 0x20, 0x41, 0x81, 0x7E)
-            '3' -> listOf(0x7E, 0x81, 0x01, 0x01, 0x06, 0x02, 0x02, 0x01, 0x01, 0x81, 0x81, 0x7E)
-            '4' -> listOf(0x01, 0x01, 0x01, 0x01, 0x01, 0x7F, 0x41, 0x41, 0x41, 0x41, 0x41, 0x00)
-            '5' -> listOf(0x7F, 0x41, 0x41, 0x41, 0x41, 0x7F, 0x01, 0x01, 0x01, 0x01, 0x81, 0x7E)
-            '6' -> listOf(0x7E, 0x81, 0x81, 0x41, 0x41, 0x7F, 0x49, 0x49, 0x49, 0x49, 0x81, 0x7E)
-            '7' -> listOf(0x7F, 0x41, 0x41, 0x01, 0x01, 0x02, 0x02, 0x04, 0x04, 0x08, 0x08, 0x10)
-            '8' -> listOf(0x7E, 0x81, 0x81, 0x81, 0x81, 0x7E, 0x81, 0x81, 0x81, 0x81, 0x81, 0x7E)
-            '9' -> listOf(0x7E, 0x81, 0x81, 0x81, 0x81, 0x7F, 0x01, 0x01, 0x01, 0x01, 0x81, 0x7E)
-            else -> listOf(0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+    private fun requestBleAndStartScan() {
+        if (bleConnectionManager.hasRequiredPermissions()) {
+            startScanAndShow()
+        } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                pendingStartScan = true
+                blePermissionLauncher.launch(
+                    arrayOf(
+                        Manifest.permission.BLUETOOTH_SCAN,
+                        Manifest.permission.BLUETOOTH_CONNECT
+                    )
+                )
+            } else {
+                startScanAndShow()
+            }
+        }
+    }
+
+    private fun startScanAndShow() {
+        bleConnectionManager.showScanSheet = true
+        if (!bleConnectionManager.isScanning) {
+            bleConnectionManager.startScanning()
         }
     }
 

@@ -279,6 +279,17 @@ class BleEspClientOptimized(
         }
     }
 
+    fun isReady(): Boolean = currentStatus == ConnectionStatus.READY
+
+    fun sendRawBitmap(pageBytes: ByteArray) {
+        Log.d(TAG, "sendRawBitmap called: ${pageBytes.size} bytes")
+        val header = buildFrameHeader(pageBytes.size)
+        val frame = ByteArray(header.size + pageBytes.size)
+        System.arraycopy(header, 0, frame, 0, header.size)
+        System.arraycopy(pageBytes, 0, frame, header.size, pageBytes.size)
+        enqueueFrame(frame, "RawBitmap")
+    }
+
     @SuppressLint("MissingPermission")
     private fun sendNextPacket() {
         val g = gatt ?: run {
