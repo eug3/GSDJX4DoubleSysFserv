@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "com.guaishoudejia.x4doublesysfserv"
     compileSdk = 35
+    ndkVersion = "21.4.7075529"
 
     defaultConfig {
         applicationId = "com.guaishoudejia.x4doublesysfserv"
@@ -23,6 +24,8 @@ android {
             abiFilters.add("armeabi-v7a")
         }
     }
+
+    // 注：暂不启用 CMake，避免 NDK 安装问题导致构建失败
 
     buildTypes {
         release {

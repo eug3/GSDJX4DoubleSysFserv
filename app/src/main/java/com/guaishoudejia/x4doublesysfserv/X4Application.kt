@@ -21,12 +21,21 @@ class X4Application : Application() {
         super.onCreate()
         Log.d(TAG, "应用启动，开始初始化...")
 
+        // ===== 关键改进：提前加载 C++ STL 库 =====
+        // Paddle-Lite JNI 依赖 libc++_shared.so，必须在其他库之前加载
+        try {
+            System.loadLibrary("c++_shared")
+            Log.d(TAG, "成功加载 libc++_shared.so")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w(TAG, "加载 libc++_shared.so 失败（可能已被加载）: ${e.message}")
+        }
+
         // 后台预初始化 OCR
         initializeOcr()
     }
 
     private fun initializeOcr() {
-        applicationScope.launch {
+        applicationScope.launch(Dispatchers.IO) {
             try {
                 // 检查可用内存
                 val runtime = Runtime.getRuntime()
@@ -39,13 +48,13 @@ class X4Application : Application() {
                     Log.w(TAG, "警告：空闲内存不足 (${freeMemory}MB)，初始化可能失败")
                 }
                 
-                Log.d(TAG, "开始初始化 PaddleOCR...")
+                Log.i(TAG, "====== 开始初始化 PaddleOCR ======")
                 val startTime = System.currentTimeMillis()
                 OcrHelper.init(this@X4Application)
                 val duration = System.currentTimeMillis() - startTime
-                Log.d(TAG, "PaddleOCR 初始化成功，耗时 ${duration}ms")
+                Log.i(TAG, "====== PaddleOCR 初始化成功，耗时 ${duration}ms，现在可以使用 OCR ======")
             } catch (e: Exception) {
-                Log.e(TAG, "PaddleOCR 初始化失败", e)
+                Log.e(TAG, "====== PaddleOCR 初始化失败 ======", e)
             }
         }
     }
