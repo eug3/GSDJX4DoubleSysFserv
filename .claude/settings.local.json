@@ -11,7 +11,11 @@
       "Bash(.:*)",
       "Bash(wc -l:*)",
       "Bash(rm:*)",
-      "Bash(./gradlew:*)"
+      "Bash(./gradlew:*)",
+      "mcp__github__get_file_contents",
+      "mcp__github__list_issues",
+      "mcp__github__search_code",
+      "mcp__deepwiki-github__read_wiki_contents"
     ]
   }
 }

@@ -93,6 +93,9 @@ dependencies {
     
     // PaddleOCR - Paddle-Lite v2.14 (自行编译版本，兼容 NDK 29)
     implementation(files("libs/PaddlePredictor.jar"))
+
+    // OpenCV for DBNet post-processing (contour detection, polygon approximation)
+    implementation("org.opencv:opencv:4.9.0")
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

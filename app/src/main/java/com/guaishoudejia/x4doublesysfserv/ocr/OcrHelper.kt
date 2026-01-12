@@ -41,19 +41,15 @@ object OcrHelper {
     
     // 模型路径
     private const val MODEL_DIR = "models"
-    private const val DEFAULT_DET_MODEL = "ch_PP-OCRv3_det_slim_opt.nb"
-    // 识别模型优先级：v5 > v2 > v3
-    private const val REC_MODEL_V5_PATTERN = "(?i).*v5.*rec.*\\.nb$"
-    private const val REC_MODEL_V2 = "ch_PP-OCRv2_rec_infer_opt.nb"
-    private const val REC_MODEL_V3 = "ch_PP-OCRv3_rec_infer.nb"
+    private const val DET_MODEL = "ch_PP-OCRv3_det_slim_opt.nb"
+    private const val REC_MODEL = "ch_PP-OCRv3_rec_infer.nb"
     private const val CLS_MODEL = "ch_ppocr_mobile_v2.0_cls_slim_opt.nb"
     private const val DICT_FILE = "dict/ppocr_keys_v1.txt"
     
     // 改用 Java API 实现
     private var ocrPredictor: PaddleOcrPredictor? = null
     private var wordLabels: List<String> = emptyList()
-    private var recModelAssetName: String = REC_MODEL_V3
-    private var enableRecognition: Boolean = false
+    private var enableRecognition: Boolean = true
     
     @Volatile
     private var isInitialized = false
@@ -71,7 +67,7 @@ object OcrHelper {
     /**
      * 初始化 PaddleOCR
      */
-    suspend fun init(context: Context) = withContext(Dispatchers.IO) {
+    suspend fun init(context: Context): Unit = withContext(Dispatchers.IO) {
         if (isInitialized) return@withContext
         
         initLock.withLock {
@@ -79,50 +75,26 @@ object OcrHelper {
             
             try {
                 Log.d(TAG, "开始初始化 PaddleOCR (Java API)...")
-                
-                // 1. 选择识别模型：优先使用 v5（如可用），否则 v2，最后 v3（v3 将禁用识别以避免崩溃）
-                val modelFiles = listAssets(context, MODEL_DIR)
-                val v5Rec = modelFiles.firstOrNull { it.matches(Regex(REC_MODEL_V5_PATTERN)) }
-                recModelAssetName = when {
-                    v5Rec != null -> {
-                        Log.i(TAG, "检测到 v5 识别模型，启用识别：$v5Rec")
-                        enableRecognition = true
-                        v5Rec
-                    }
-                    assetExists(context, "$MODEL_DIR/$REC_MODEL_V2") -> {
-                        Log.i(TAG, "检测到 v2 识别模型，启用识别：$REC_MODEL_V2")
-                        enableRecognition = true
-                        REC_MODEL_V2
-                    }
-                    else -> {
-                        Log.w(TAG, "未找到 v5/v2 识别模型，将使用 v3，但暂时禁用识别以避免 FC 维度崩溃。请放置 v5 或 $REC_MODEL_V2 到 assets/$MODEL_DIR/")
-                        enableRecognition = false
-                        REC_MODEL_V3
-                    }
-                }
 
-                // 2. 复制模型文件
+                // 1. 复制模型文件（当前工程只保留一份 DET/REC/CLS 模型）
                 val cacheDir = File(context.cacheDir, MODEL_DIR)
                 if (!cacheDir.exists()) cacheDir.mkdirs()
 
-                // 检测模型：优先 v5（文件名中含 v5 + det + .nb），否则默认 v3
-                val v5Det = modelFiles.firstOrNull { it.contains("det", ignoreCase = true) && it.contains("v5", ignoreCase = true) && it.endsWith(".nb") } ?: DEFAULT_DET_MODEL
-
-                listOf(v5Det, recModelAssetName, CLS_MODEL).forEach { modelName ->
+                listOf(DET_MODEL, REC_MODEL, CLS_MODEL).forEach { modelName ->
                     copyAssetFile(context, "$MODEL_DIR/$modelName", File(cacheDir, modelName))
                 }
 
                 // 3. 加载字典
                 wordLabels = loadDict(context, DICT_FILE)
                 
-                // 4. 创建 Java API 预测器 (不需要 libocr_native.so)
+                // 3. 创建 Java API 预测器 (不需要 libocr_native.so)
                 ocrPredictor = PaddleOcrPredictor(
-                    detModelPath = File(cacheDir, v5Det).absolutePath,
-                    recModelPath = File(cacheDir, recModelAssetName).absolutePath,
+                    detModelPath = File(cacheDir, DET_MODEL).absolutePath,
+                    recModelPath = File(cacheDir, REC_MODEL).absolutePath,
                     clsModelPath = File(cacheDir, CLS_MODEL).absolutePath,
                     wordLabels = wordLabels,
                     cpuThreadNum = 1,
-                    safeMode = !enableRecognition // v5/v2 存在则启用识别，否则 SAFE（仅检测）
+                    safeMode = false
                 )
                 
                 isInitialized = true
@@ -172,12 +144,29 @@ object OcrHelper {
         val predictor = ocrPredictor ?: throw IllegalStateException("OCR 预测器为空")
         predictor.drawDetectionBoxes(bitmap)
     }
+
+    /**
+     * 在已二值化的图像上绘制检测框（用于确保与 det 输入是同一张 bitmap）
+     */
+    suspend fun drawDetectionBoxesOnBinary(binaryBitmap: Bitmap, maxSideLen: Int = 960): Bitmap = withContext(Dispatchers.IO) {
+        if (!isInitialized) {
+            Log.d(TAG, "OCR 尚未就绪，挂起请求等待初始化...")
+            try {
+                initDeferred.await()
+            } catch (e: Exception) {
+                throw IllegalStateException("OCR 初始化之前已失败: ${e.message}")
+            }
+        }
+
+        val predictor = ocrPredictor ?: throw IllegalStateException("OCR 预测器为空")
+        predictor.drawDetectionBoxesOnBinary(binaryBitmap, maxSideLen)
+    }
     
     /**
      * 识别图片中的文字
      * 改进：如果引擎未就绪，会阻塞挂起当前协程，直到初始化完成
      */
-    suspend fun recognizeText(bitmap: Bitmap): OcrResult = withContext(Dispatchers.IO) {
+    suspend fun recognizeText(bitmap: Bitmap, alreadyBinarized: Boolean = false): OcrResult = withContext(Dispatchers.IO) {
         if (!isInitialized) {
             Log.d(TAG, "OCR 尚未就绪，挂起请求等待初始化...")
             try {
@@ -194,7 +183,7 @@ object OcrHelper {
             // 若启用了识别（v2 模型可用），则 runRec=1，否则仅做检测
             // 启用方向分类 (runCls=1) 以纠正文字方向，提高识别准确率
             val runRec = if (enableRecognition) 1 else 0
-            val rawResults = predictor.runImage(bitmap, 960, 1, 1, runRec)
+            val rawResults = predictor.runImage(bitmap, 960, 1, 1, runRec, alreadyBinarized)
 
             val blocks = mutableListOf<TextBlock>()
             val textLines = mutableListOf<String>()
@@ -230,27 +219,12 @@ object OcrHelper {
             }
         }
     }
-
-    private fun assetExists(context: Context, assetPath: String): Boolean {
-        return try {
-            context.assets.open(assetPath).close()
-            true
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun listAssets(context: Context, dir: String): List<String> {
-        return try {
-            context.assets.list(dir)?.toList() ?: emptyList()
-        } catch (e: Exception) {
-            emptyList()
-        }
-    }
     
     private fun loadDict(context: Context, dictPath: String): List<String> {
-        return context.assets.open(dictPath).bufferedReader().use { 
-            it.readLines().filter { line -> line.isNotBlank() } 
+        // 注意：ppocr_keys_v1.txt 内可能包含“全角空格”等空白字符（例如 U+3000）。
+        // 如果用 isNotBlank() 过滤会把它丢掉，导致字典索引整体错位，从而输出乱码。
+        return context.assets.open(dictPath).bufferedReader(charset = Charsets.UTF_8).use {
+            it.readLines().filter { line -> line.isNotEmpty() }
         }
     }
 }

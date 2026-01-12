@@ -401,18 +401,18 @@ class GeckoActivity : ComponentActivity() {
                 }
 
                 Log.d("SYNC", "Canvas 抓取成功，尺寸: ${bitmap.width}x${bitmap.height}")
-                
-                // 2.5. 绘制检测框到图像上（用于预览调试）
-                val boxedBitmap = withContext(Dispatchers.Default) {
-                    OcrHelper.drawDetectionBoxes(bitmap)
-                }
-                Log.d("SYNC", "已在图像上绘制检测框")
-                
-                // 2.6. 对图像进行二值化处理（二值化后再用于识别）
+
+                // 2.4. 统一二值化：预览(det) 与 OCR(det+rec) 共用同一张二值化 bitmap
                 val binarizedBitmap = withContext(Dispatchers.Default) {
                     OcrHelper.binarizeBitmap(bitmap)
                 }
                 Log.d("SYNC", "图像二值化完成")
+                
+                // 2.5. 绘制检测框到图像上（用于预览调试）
+                val boxedBitmap = withContext(Dispatchers.Default) {
+                    OcrHelper.drawDetectionBoxesOnBinary(binarizedBitmap)
+                }
+                Log.d("SYNC", "已在图像上绘制检测框")
                 
                 // 添加带框的原始图像到历史（用于预览）
                 renderHistory.add(boxedBitmap)
@@ -442,7 +442,9 @@ class GeckoActivity : ComponentActivity() {
 
                 withContext(Dispatchers.Default) {
                     try {
-                        val ocr = OcrHelper.recognizeText(binarizedBitmap)
+                        // 传入同一张二值化 bitmap，且告知底层跳过重复二值化
+                        // 确保进入 det 的图、预览的图、进入 rec 的图像素完全一致
+                        val ocr = OcrHelper.recognizeText(binarizedBitmap, alreadyBinarized = true)
                         Log.d("SYNC", "OCR 识别完成: ${ocr.blocks.size} 段落")
 
                         withContext(Dispatchers.Main) {

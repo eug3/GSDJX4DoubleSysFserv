@@ -114,9 +114,18 @@ class PaddleOcrPredictor(
     }
     
     /**
-     * 对图像应用 Otsu 二值化，返回黑白图像（用于预览）
+     * 对图像应用 Otsu 二值化，返回黑白图像（用于预览/调试）
+     * 公开方法，外部可调用
      */
     fun applyBinarization(bitmap: Bitmap): Bitmap {
+        return binarizeImage(bitmap)
+    }
+    
+    /**
+     * 对图像应用 Otsu 二值化，返回黑白图像
+     * 该方法用于 OCR 管线前处理，确保 det 和 rec 都基于高对比度的二值化输入
+     */
+    private fun binarizeImage(bitmap: Bitmap): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
         
@@ -223,12 +232,15 @@ class PaddleOcrPredictor(
      */
     fun drawDetectionBoxes(bitmap: Bitmap): Bitmap {
         try {
-            val detBoxes = detectText(bitmap, 960)
+            // 先对输入图像进行二值化，确保预览图与 det 模型输入一致
+            val binaryBitmap = binarizeImage(bitmap)
+
+            val detBoxes = detectText(binaryBitmap, 960)
             Log.d(TAG, "绘制 ${detBoxes.size} 个检测框")
             
-            // 创建可绘制的副本
-            val config = bitmap.config ?: Bitmap.Config.ARGB_8888
-            val result = bitmap.copy(config, true)
+            // 在二值化图像上绘制检测框
+            val config = binaryBitmap.config ?: Bitmap.Config.ARGB_8888
+            val result = binaryBitmap.copy(config, true)
             val canvas = android.graphics.Canvas(result)
             val paint = android.graphics.Paint().apply {
                 style = android.graphics.Paint.Style.STROKE
@@ -264,6 +276,50 @@ class PaddleOcrPredictor(
             return bitmap
         }
     }
+
+    /**
+     * 在已二值化的图像上绘制检测框（用于确保与 det 输入是同一张 bitmap）
+     */
+    fun drawDetectionBoxesOnBinary(binaryBitmap: Bitmap, maxSideLen: Int = 960): Bitmap {
+        try {
+            val detBoxes = detectText(binaryBitmap, maxSideLen)
+            Log.d(TAG, "绘制 ${detBoxes.size} 个检测框(已二值化输入)")
+
+            val config = binaryBitmap.config ?: Bitmap.Config.ARGB_8888
+            val result = binaryBitmap.copy(config, true)
+            val canvas = android.graphics.Canvas(result)
+            val paint = android.graphics.Paint().apply {
+                style = android.graphics.Paint.Style.STROKE
+                strokeWidth = 3f
+                color = android.graphics.Color.RED
+            }
+
+            for ((index, box) in detBoxes.withIndex()) {
+                if (box.size >= 4) {
+                    val path = android.graphics.Path()
+                    path.moveTo(box[0].x.toFloat(), box[0].y.toFloat())
+                    for (i in 1 until box.size) {
+                        path.lineTo(box[i].x.toFloat(), box[i].y.toFloat())
+                    }
+                    path.close()
+                    canvas.drawPath(path, paint)
+                }
+
+                val textPaint = android.graphics.Paint().apply {
+                    color = android.graphics.Color.YELLOW
+                    textSize = 24f
+                }
+                if (box.isNotEmpty()) {
+                    canvas.drawText("$index", box[0].x.toFloat(), (box[0].y - 10).toFloat(), textPaint)
+                }
+            }
+
+            return result
+        } catch (e: Exception) {
+            Log.e(TAG, "绘制检测框失败(已二值化输入)", e)
+            return binaryBitmap
+        }
+    }
     
     /**
      * 执行 OCR 识别
@@ -273,18 +329,24 @@ class PaddleOcrPredictor(
         maxSideLen: Int = 960,
         runDet: Int = 1,
         runCls: Int = 1,
-        runRec: Int = 1
+        runRec: Int = 1,
+        alreadyBinarized: Boolean = false
     ): List<OcrResultModel> {
         
         try {
             Log.d(TAG, "开始 OCR 识别，图像: ${bitmap.width}x${bitmap.height}")
             
+            // 0. 二值化预处理：在管线开始对输入图像进行二值化
+            // 这样可以确保 det 和 rec 都基于清晰、高对比度的二值化图像
+            // 如果上层已经二值化（并希望 det/预览/rec 共享同一张 bitmap），则跳过
+            val binaryBitmap = if (alreadyBinarized) bitmap else binarizeImage(bitmap)
+            
             if (runDet == 0) {
-                return listOf(recognizeFullImage(bitmap, runCls == 1, runRec == 1))
+                return listOf(recognizeFullImage(binaryBitmap, runCls == 1, runRec == 1))
             }
             
-            // 1. 文本检测
-            val detBoxes = detectText(bitmap, maxSideLen)
+            // 1. 文本检测（基于二值化图像）
+            val detBoxes = detectText(binaryBitmap, maxSideLen)
             Log.d(TAG, "检测到 ${detBoxes.size} 个文本区域")
             
             if (detBoxes.isEmpty()) {
@@ -309,7 +371,7 @@ class PaddleOcrPredictor(
                     val maxY = box.maxOf { it.y }
                     Log.d(TAG, "文本框 $index: 四边形[$boxCoords], 矩形范围: (${minX},${minY})-(${maxX},${maxY}), 尺寸: ${maxX-minX}x${maxY-minY}")
                     
-                    val cropped = cropBox(bitmap, box)
+                    val cropped = cropBox(binaryBitmap, box)
                     
                     // 分类
                     if (runCls == 1 && clsPredictor != null) {
@@ -417,90 +479,22 @@ class PaddleOcrPredictor(
             // 步骤 1: 直接 resize 到目标尺寸（不需要 padding，直接用动态宽度）
             val resizedBitmap = Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
 
-            // 步骤 2: 提取像素并二值化增强（提升低对比度文字识别率）
+            // 步骤 2: 提取像素并转换为 float 张量（已是二值化图像）
             val pixels = IntArray(targetWidth * targetHeight)
             resizedBitmap.getPixels(pixels, 0, targetWidth, 0, 0, targetWidth, targetHeight)
-            
-            // 二值化预处理：灰度化 + Otsu 全局阈值
-            val grayPixels = IntArray(targetWidth * targetHeight)
-            var sumGray = 0L
-            for (i in pixels.indices) {
-                val pixel = pixels[i]
-                val r = (pixel shr 16) and 0xFF
-                val g = (pixel shr 8) and 0xFF
-                val b = pixel and 0xFF
-                // 加权灰度化 (与 OpenCV GRAY 一致)
-                val gray = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
-                grayPixels[i] = gray
-                sumGray += gray
-            }
-            
-            val avgGray = sumGray / grayPixels.size
-            val isDarkBackground = avgGray < 128
-            
-            // Otsu 自动阈值计算：找到最佳阈值使类间方差最大
-            val histogram = IntArray(256)
-            for (gray in grayPixels) {
-                histogram[gray]++
-            }
-            
-            val total = targetWidth * targetHeight
-            var sum = 0.0
-            for (i in 0 until 256) {
-                sum += i * histogram[i]
-            }
-            
-            var sumB = 0.0
-            var wB = 0
-            var wF = 0
-            var maxVariance = 0.0
-            var otsuThreshold = 128
-            
-            for (t in 0 until 256) {
-                wB += histogram[t]
-                if (wB == 0) continue
-                
-                wF = total - wB
-                if (wF == 0) break
-                
-                sumB += t * histogram[t]
-                val mB = sumB / wB
-                val mF = (sum - sumB) / wF
-                
-                // 类间方差
-                val variance = wB.toDouble() * wF * (mB - mF) * (mB - mF)
-                
-                if (variance > maxVariance) {
-                    maxVariance = variance
-                    otsuThreshold = t
-                }
-            }
-            
-            // 应用 Otsu 阈值进行二值化：纯黑白图像
-            val binaryPixels = IntArray(targetWidth * targetHeight)
-            for (i in grayPixels.indices) {
-                // 根据背景类型调整策略
-                binaryPixels[i] = if (isDarkBackground) {
-                    // 深色背景：反转，让浅色文字变成黑色
-                    if (grayPixels[i] > otsuThreshold) 0 else 255
-                } else {
-                    // 浅色背景：保持，让深色文字变成黑色
-                    if (grayPixels[i] < otsuThreshold) 0 else 255
-                }
-            }
-            
-            Log.d(TAG, "Otsu 二值化完成，阈值: $otsuThreshold, 背景: ${if (isDarkBackground) "深色" else "浅色"}")
 
             // 步骤 3: 转换为 [1, 3, targetHeight, targetWidth] 的 float 数组
-            // 使用二值化后的像素，BGR 三通道使用相同值（灰度图）
+            // 二值化图像的像素已经是 0 或 255，三通道使用相同值（灰度）
             val inputData = FloatArray(3 * targetHeight * targetWidth)
             for (y in 0 until targetHeight) {
                 for (x in 0 until targetWidth) {
                     val baseIdx = y * targetWidth + x
-                    val binaryValue = binaryPixels[baseIdx].toFloat() / 255.0f
-                    val normalizedValue = (binaryValue - 0.5f) * 2.0f  // 归一化到 [-1, 1]
+                    val pixel = pixels[baseIdx]
+                    // 二值化图像：r = g = b（灰度值 0 或 255）
+                    val grayValue = (pixel and 0xFF).toFloat() / 255.0f
+                    val normalizedValue = (grayValue - 0.5f) * 2.0f  // 归一化到 [-1, 1]
                     
-                    // BGR 三通道使用相同的二值化值
+                    // 三通道使用相同的值
                     inputData[0 * targetHeight * targetWidth + baseIdx] = normalizedValue
                     inputData[1 * targetHeight * targetWidth + baseIdx] = normalizedValue
                     inputData[2 * targetHeight * targetWidth + baseIdx] = normalizedValue
@@ -678,12 +672,20 @@ class PaddleOcrPredictor(
             maxY = max(maxY, point.y)
         }
         
+        // 额外扩展：尽量扩到纯背景（白边），避免笔画/标点被切掉
+        // 上下扩更多、左右扩少量；并限制范围，避免吞并上下行/左右相邻内容
+        val rawW = (maxX - minX).coerceAtLeast(1)
+        val rawH = (maxY - minY).coerceAtLeast(1)
+        val extraY = (rawH * 0.85f).toInt().coerceIn(12, 96)
+        val extraX = (rawW * 0.06f).toInt().coerceIn(6, 48)
+
+        // 这里把 maxX/maxY 作为“右/下边界（排他）”来处理，避免裁剪少 1px
         // 确保不超出图像边界
-        minX = max(0, minX)
-        minY = max(0, minY)
-        maxX = min(bitmap.width - 1, maxX)
-        maxY = min(bitmap.height - 1, maxY)
-        
+        minX = max(0, minX - extraX)
+        minY = max(0, minY - extraY)
+        maxX = min(bitmap.width, maxX + extraX)
+        maxY = min(bitmap.height, maxY + extraY)
+
         val width = maxX - minX
         val height = maxY - minY
         
@@ -692,7 +694,7 @@ class PaddleOcrPredictor(
             return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
         }
         
-        Log.d(TAG, "✓ 裁剪框: ($minX, $minY) - ($maxX, $maxY), 尺寸: ${width}x${height}")
+        Log.d(TAG, "✓ 裁剪框(左右扩展$extraX/上下扩展$extraY): ($minX, $minY) - ($maxX, $maxY), 尺寸: ${width}x${height}")
         return Bitmap.createBitmap(bitmap, minX, minY, width, height)
     }
     
@@ -720,7 +722,8 @@ class PaddleOcrPredictor(
         Log.d(TAG, "DBNet 输出形状: batch=$batch channels=$channels h=$h w=$w")
         
         val boxes = mutableListOf<Array<Point>>()
-        val threshold = 0.3f
+        // 降低阈值到 0.2 以扩展掩码覆盖范围，确保文字区域完整
+        val threshold = 0.2f
         
         // 查找高置信度的像素
         val mask = BooleanArray(h * w)
@@ -728,13 +731,17 @@ class PaddleOcrPredictor(
             mask[i] = output[i] > threshold
         }
         
-        // 对mask进行膨胀（dilate）操作来扩大文字区域，防止边界过紧
-        val dilatedMask = dilate(mask, h, w, iterations = 2)
+        // 对mask进行膨胀（dilate）操作来扩大文字区域，防止边界过紧导致文字被截断
+        // 增加膨胀次数从 2 到 3，确保文字边界有足够的扩展
+        val dilatedMask = dilate(mask, h, w, iterations = 3)
         
         // 简单的连通分量标记
         val visited = BooleanArray(h * w)
+        // 使用 8 邻域，避免字符笔画/相邻字符因对角连接而被拆分
         val directions = arrayOf(
-            Pair(-1, 0), Pair(1, 0), Pair(0, -1), Pair(0, 1)
+            Pair(-1, -1), Pair(-1, 0), Pair(-1, 1),
+            Pair(0, -1),               Pair(0, 1),
+            Pair(1, -1),  Pair(1, 0),  Pair(1, 1)
         )
         
         for (idx in dilatedMask.indices) {
@@ -745,26 +752,40 @@ class PaddleOcrPredictor(
             val box = mutableListOf<Point>()
             val queue = mutableListOf(Pair(y, x))
             visited[idx] = true
+
+            var minCx = x
+            var maxCx = x
+            var minCy = y
+            var maxCy = y
             
             while (queue.isNotEmpty()) {
                 val (cy, cx) = queue.removeAt(0)
                 box.add(Point(cx, cy))
+
+                if (cx < minCx) minCx = cx
+                if (cx > maxCx) maxCx = cx
+                if (cy < minCy) minCy = cy
+                if (cy > maxCy) maxCy = cy
                 
                 for ((dy, dx) in directions) {
                     val ny = cy + dy
                     val nx = cx + dx
                     if (ny in 0 until h && nx in 0 until w) {
                         val nidx = ny * w + nx
-                        if (mask[nidx] && !visited[nidx]) {
+                        // 关键：连通域扩展必须基于膨胀后的掩码，否则膨胀不会生效
+                        if (dilatedMask[nidx] && !visited[nidx]) {
                             visited[nidx] = true
                             queue.add(Pair(ny, nx))
                         }
                     }
                 }
             }
-            
-            if (box.size > 50) {  // 最小面积阈值
-                // 计算外接矩形
+
+            // 过滤过小连通域：避免噪声，但不要把单字/标点误删
+            val compW = maxCx - minCx + 1
+            val compH = maxCy - minCy + 1
+            val compArea = compW * compH
+            if (compArea >= 30 && box.size >= 15) {
                 val rect = getBoundingBox(box, scaleRatio)
                 boxes.add(rect)
             }
@@ -821,7 +842,7 @@ class PaddleOcrPredictor(
     }
     
     /**
-     * 从点集计算外接矩形
+     * 从点集计算外接矩形，并添加边界扩展以确保文字完整性
      */
     private fun getBoundingBox(points: List<Point>, scale: Float): Array<Point> {
         var minX = Int.MAX_VALUE
@@ -841,6 +862,15 @@ class PaddleOcrPredictor(
         minY = (minY / scale).toInt()
         maxX = (maxX / scale).toInt()
         maxY = (maxY / scale).toInt()
+        
+        // 添加边界扩展：上下更大，左右小幅；目标是把标点/细小笔画也包进去
+        val expandX = max(4, ((maxX - minX) * 0.08f).toInt())
+        val expandY = max(12, ((maxY - minY) * 0.40f).toInt())
+        
+        minX = max(0, minX - expandX)
+        minY = max(0, minY - expandY)
+        maxX += expandX
+        maxY += expandY
         
         return arrayOf(
             Point(minX, minY),
@@ -900,62 +930,123 @@ class PaddleOcrPredictor(
             return Pair("", 0.5f)
         }
         
-        // CTC 贪心解码 (只处理第一个 batch)
-        val result = StringBuilder()
-        var sumConf = 0f
-        var prevClass = -1
-        var count = 0
-        var blankCount = 0
-        
-        for (t in 0 until seqLen) {
-            var maxVal = Float.NEGATIVE_INFINITY
-            var maxIdx = 0
-            
-            // 找出该时间步最大的 logit
-            // 索引计算: [batch=0, time=t, class=c] -> (0 * seqLen * numClasses) + (t * numClasses) + c
-            for (c in 0 until numClasses) {
-                val idx = t * numClasses + c
-                if (idx < output.size && output[idx] > maxVal) {
-                    maxVal = output[idx]
-                    maxIdx = c
-                }
-            }
-            
-            // CTC 解码：
-            // 1. 去重（相邻相同字符只保留一个）
-            // 2. 忽略 blank 标记（通常是 wordLabels.size 即 6622）
-            // 3. 超出字典范围的索引视为特殊标记（unknown/padding）
-            if (maxIdx != prevClass) {
-                if (maxIdx >= 0 && maxIdx < wordLabels.size) {
-                    // 正常字符：在字典范围内
-                    val char = wordLabels.getOrNull(maxIdx)
-                    if (char != null && char.isNotBlank()) {
-                        result.append(char)
-                        sumConf += maxVal
-                        count++
+        data class DecodeAttempt(
+            val text: String,
+            val avgConf: Float,
+            val keptCount: Int,
+            val blankCount: Int,
+            val unknownCount: Int,
+            val blankIndex: Int,
+            val dictOffset: Int,
+            val extraSpaceIndex: Int?
+        )
+
+        fun decodeWith(blankIndex: Int, dictOffset: Int, extraSpaceIndex: Int?): DecodeAttempt {
+            val dictSize = wordLabels.size
+            val sb = StringBuilder()
+            var sumConf = 0f
+            var keptCount = 0
+            var blankCount = 0
+            var unknownCount = 0
+            var prevClass = -1
+
+            for (t in 0 until seqLen) {
+                var maxVal = Float.NEGATIVE_INFINITY
+                var maxIdx = 0
+                for (c in 0 until numClasses) {
+                    val idx = t * numClasses + c
+                    val v = output[idx]
+                    if (v > maxVal) {
+                        maxVal = v
+                        maxIdx = c
                     }
-                } else if (maxIdx >= wordLabels.size) {
-                    // 特殊标记：blank (6622) / unknown (6623) / padding (6624)
-                    // 跳过这些标记，不添加字符，但记录 blank 出现次数
-                    blankCount++
+                }
+
+                // 先去重
+                if (maxIdx == prevClass) {
+                    continue
+                }
+                prevClass = maxIdx
+
+                // 再处理 blank / space / normal
+                when {
+                    maxIdx == blankIndex -> {
+                        blankCount++
+                    }
+                    extraSpaceIndex != null && maxIdx == extraSpaceIndex -> {
+                        sb.append(' ')
+                        sumConf += maxVal
+                        keptCount++
+                    }
+                    else -> {
+                        val dictIdx = maxIdx - dictOffset
+                        if (dictIdx in 0 until dictSize) {
+                            sb.append(wordLabels[dictIdx])
+                            sumConf += maxVal
+                            keptCount++
+                        } else {
+                            unknownCount++
+                        }
+                    }
                 }
             }
-            prevClass = maxIdx
+
+            val avgConf = if (keptCount > 0) {
+                val confidence = sumConf / keptCount
+                (1f / (1f + kotlin.math.exp(-confidence))).coerceIn(0f, 1f)
+            } else {
+                0.5f
+            }
+
+            return DecodeAttempt(
+                text = sb.toString(),
+                avgConf = avgConf,
+                keptCount = keptCount,
+                blankCount = blankCount,
+                unknownCount = unknownCount,
+                blankIndex = blankIndex,
+                dictOffset = dictOffset,
+                extraSpaceIndex = extraSpaceIndex
+            )
         }
-        
-        val avgConf = if (count > 0) {
-            // 转换为 0-1 范围的置信度
-            val confidence = sumConf / count
-            // 简单的 sigmoid 变换
-            (1f / (1f + kotlin.math.exp(-confidence))).coerceIn(0f, 1f)
-        } else {
-            0.5f
+
+        val dictSize = wordLabels.size
+        // PaddleOCR 常见情况：num_classes = dictSize + 2（blank + dict + space）
+        val defaultExtraSpaceIndex = if (numClasses == dictSize + 2) dictSize + 1 else null
+
+        // 候选：自动尝试几种常见 blank/index 对齐方式
+        val candidates = mutableListOf<DecodeAttempt>()
+        // 1) PaddleOCR 官方：blank=0, dictOffset=1
+        candidates.add(decodeWith(blankIndex = 0, dictOffset = 1, extraSpaceIndex = defaultExtraSpaceIndex))
+        // 2) 兼容一些导出：blank=dictSize, dictOffset=0
+        if (dictSize in 0 until numClasses) {
+            candidates.add(decodeWith(blankIndex = dictSize, dictOffset = 0, extraSpaceIndex = null))
         }
-        
-        val text = result.toString()
-        Log.d(TAG, "识别结果: '$text' (置信度: $avgConf, 字符数: $count, blank数: $blankCount)")
-        
-        return Pair(text, avgConf)
+        // 3) 兼容一些导出：blank=dictSize+1, dictOffset=0
+        if (dictSize + 1 in 0 until numClasses) {
+            candidates.add(decodeWith(blankIndex = dictSize + 1, dictOffset = 0, extraSpaceIndex = null))
+        }
+        // 4) 兜底：blank=numClasses-1 / numClasses-2
+        candidates.add(decodeWith(blankIndex = numClasses - 1, dictOffset = 0, extraSpaceIndex = null))
+        if (numClasses - 2 >= 0) {
+            candidates.add(decodeWith(blankIndex = numClasses - 2, dictOffset = 0, extraSpaceIndex = null))
+        }
+
+        // 选择最合理的解码：优先 blank 多（CTC 正常应大量 blank），其次 unknown 少，其次置信度高
+        val best = candidates
+            .sortedWith(
+                compareByDescending<DecodeAttempt> { it.blankCount }
+                    .thenBy { it.unknownCount }
+                    .thenByDescending { it.avgConf }
+            )
+            .first()
+
+        Log.d(
+            TAG,
+            "识别结果: '${best.text}' (置信度: ${best.avgConf}, 字符数: ${best.keptCount}, blank数: ${best.blankCount}, unknown数: ${best.unknownCount}, blankIndex=${best.blankIndex}, dictOffset=${best.dictOffset}, spaceIndex=${best.extraSpaceIndex})"
+        )
+
+        return Pair(best.text, best.avgConf)
     }
     
     /**
