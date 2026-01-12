@@ -15,10 +15,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.opencv.android.OpenCVLoader
-import org.opencv.android.Utils
-import org.opencv.core.*
-import org.opencv.imgproc.Imgproc
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.abs
@@ -35,15 +31,12 @@ import kotlin.math.min
  *
  * 环境要求:
  * - ONNX Runtime Mobile 1.20.0+
- * - OpenCV 4.9.0+
+ * - 纯 Kotlin 实现，无 OpenCV 依赖
  */
 class OnnxOcrHelper {
 
     companion object {
         private const val TAG = "OnnxOcrHelper"
-
-        @Volatile
-        private var isOpenCvReady: Boolean = false
 
         // 模型文件名
         private const val MODEL_DIR = "models_onnx"
@@ -61,23 +54,6 @@ class OnnxOcrHelper {
         private const val REC_IMAGE_HEIGHT = 48
         private const val REC_MAX_WIDTH = 320
         private const val REC_MIN_WIDTH = 8
-    }
-
-    private fun ensureOpenCvLoaded() {
-        if (isOpenCvReady) return
-        val ok = try {
-            OpenCVLoader.initDebug()
-        } catch (t: Throwable) {
-            false
-        }
-        if (!ok) {
-            throw IllegalStateException(
-                "OpenCV 初始化失败：原生库未加载（OpenCVLoader.initDebug() 返回 false）。" +
-                    " 请确认依赖 org.opencv:opencv 已正确打包到 APK。"
-            )
-        }
-        isOpenCvReady = true
-        Log.i(TAG, "OpenCV 初始化成功")
     }
 
     /**
@@ -139,9 +115,6 @@ class OnnxOcrHelper {
 
             try {
                 Log.d(TAG, "开始初始化 ONNX OCR (PP-OCRv5)...")
-
-                // OpenCV 原生库必须先加载，否则 Mat/Imgproc 会直接崩溃
-                ensureOpenCvLoaded()
 
                 // 1. 复制模型文件到缓存目录
                 val cacheDir = File(context.cacheDir, MODEL_DIR)
@@ -813,8 +786,6 @@ class OnnxOcrHelper {
             initDeferred.await()
         }
 
-        ensureOpenCvLoaded()
-
         try {
             val boxes = textDetection(bitmap)
             val result = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
@@ -858,34 +829,80 @@ class OnnxOcrHelper {
     }
 
     /**
-     * 二值化处理
+     * 二值化处理 - 纯 Kotlin 实现，无需 OpenCV
      */
     suspend fun binarizeBitmap(bitmap: Bitmap): Bitmap = withContext(Dispatchers.IO) {
-        ensureOpenCvLoaded()
+        val width = bitmap.width
+        val height = bitmap.height
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
-        val mat = Mat()
-        Utils.bitmapToMat(bitmap, mat)
+        // 提取灰度值
+        val grayValues = IntArray(width * height)
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
+            // 使用人眼敏感的灰度公式: r*0.299 + g*0.587 + b*0.114
+            grayValues[i] = ((pixel shr 16 and 0xFF) * 299 +
+                            (pixel shr 8 and 0xFF) * 587 +
+                            (pixel and 0xFF) * 114) / 1000
+        }
 
-        val grayMat = Mat()
-        Imgproc.cvtColor(mat, grayMat, Imgproc.COLOR_RGBA2GRAY)
+        // OTSU 自动阈值计算
+        val threshold = calculateOtsuThreshold(grayValues, width, height)
 
-        val binaryMat = Mat()
-        Imgproc.threshold(
-            grayMat, binaryMat,
-            0.0, 255.0,
-            Imgproc.THRESH_BINARY_INV + Imgproc.THRESH_OTSU
-        )
+        // 应用二值化
+        val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        for (i in grayValues.indices) {
+            val value = if (grayValues[i] > threshold) 0xFFFFFFFF.toInt() else 0xFF000000.toInt()
+            pixels[i] = value
+        }
+        result.setPixels(pixels, 0, width, 0, 0, width, height)
 
-        val resultBitmap = Bitmap.createBitmap(
-            binaryMat.cols(), binaryMat.rows(), Bitmap.Config.ARGB_8888
-        )
-        Utils.matToBitmap(binaryMat, resultBitmap)
+        result
+    }
 
-        mat.release()
-        grayMat.release()
-        binaryMat.release()
+    /**
+     * OTSU 自动阈值算法 - 纯 Kotlin 实现
+     */
+    private fun calculateOtsuThreshold(grayValues: IntArray, width: Int, height: Int): Int {
+        val total = width * height
+        val histogram = IntArray(256)
+        for (gray in grayValues) {
+            histogram[gray.coerceIn(0, 255)]++
+        }
 
-        resultBitmap
+        var sum = 0
+        for (i in 0..255) {
+            sum += i * histogram[i]
+        }
+
+        var sumB = 0
+        var wB = 0
+        var wF: Int
+        var maxVariance = 0.0
+        var threshold = 0
+
+        for (t in 0..255) {
+            wB += histogram[t]
+            if (wB == 0) continue
+
+            wF = total - wB
+            if (wF == 0) break
+
+            sumB += t * histogram[t]
+
+            val mB = sumB.toDouble() / wB
+            val mF = (sum - sumB).toDouble() / wF
+
+            val variance = wB.toDouble() * wF * (mB - mF) * (mB - mF)
+
+            if (variance > maxVariance) {
+                maxVariance = variance
+                threshold = t
+            }
+        }
+
+        return threshold
     }
 
     /**

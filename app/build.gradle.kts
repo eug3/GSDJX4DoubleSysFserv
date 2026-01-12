@@ -9,7 +9,7 @@ plugins {
 
 android {
     namespace = "com.guaishoudejia.x4doublesysfserv"
-    compileSdk = 35
+    compileSdk = 36
     ndkVersion = "29.0.14206865"
 
     defaultConfig {
@@ -89,7 +89,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.okhttp)
     implementation("androidx.browser:browser:1.8.0")
-    implementation("org.mozilla.geckoview:geckoview:115.0.20230706202047")
+    implementation("org.mozilla.geckoview:geckoview:+")  // Use latest available version
     
     // ONNX Runtime Mobile for PP-OCRv5
     implementation(libs.onnxruntime.android)
@@ -98,9 +98,6 @@ dependencies {
     // PaddleOCR - Paddle-Lite v2.14 (自行编译版本，兼容 NDK 29)
     implementation(files("libs/PaddlePredictor.jar"))
 
-    // OpenCV for DBNet post-processing (contour detection, polygon approximation)
-    implementation("org.opencv:opencv:4.9.0")
-    
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
