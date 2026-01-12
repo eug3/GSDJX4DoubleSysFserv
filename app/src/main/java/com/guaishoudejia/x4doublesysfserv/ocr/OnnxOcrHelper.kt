@@ -378,7 +378,7 @@ class OnnxOcrHelper {
             }
 
             val boxes = postprocessDetection(
-                outputData, outputShape, scaledBitmap.width, scaledBitmap.height, ratio
+                outputData, outputShape, bitmap.width, bitmap.height, ratio
             )
 
             // 清理
@@ -586,8 +586,8 @@ class OnnxOcrHelper {
     private fun postprocessDetection(
         output: FloatArray,
         shape: LongArray,
-        width: Int,
-        height: Int,
+        srcWidth: Int,
+        srcHeight: Int,
         scaleRatio: Float
     ): List<Array<Point>> {
         val batch = shape[0].toInt()
@@ -665,8 +665,8 @@ class OnnxOcrHelper {
 
                 val realMinX = max(0, (minX / scaleRatio).toInt() - expandX)
                 val realMinY = max(0, (minY / scaleRatio).toInt() - expandY)
-                val realMaxX = min(width - 1, (maxX / scaleRatio).toInt() + expandX)
-                val realMaxY = min(height - 1, (maxY / scaleRatio).toInt() + expandY)
+                val realMaxX = min(srcWidth - 1, (maxX / scaleRatio).toInt() + expandX)
+                val realMaxY = min(srcHeight - 1, (maxY / scaleRatio).toInt() + expandY)
 
                 boxes.add(arrayOf(
                     Point(realMinX, realMinY),
@@ -682,9 +682,9 @@ class OnnxOcrHelper {
             Log.w(TAG, "未检测到文本框，返回全图")
             boxes.add(arrayOf(
                 Point(0, 0),
-                Point(width - 1, 0),
-                Point(width - 1, height - 1),
-                Point(0, height - 1)
+                Point(srcWidth - 1, 0),
+                Point(srcWidth - 1, srcHeight - 1),
+                Point(0, srcHeight - 1)
             ))
         }
 
