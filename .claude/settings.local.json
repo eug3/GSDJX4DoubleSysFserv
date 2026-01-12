@@ -15,7 +15,8 @@
       "mcp__github__get_file_contents",
       "mcp__github__list_issues",
       "mcp__github__search_code",
-      "mcp__deepwiki-github__read_wiki_contents"
+      "mcp__deepwiki-github__read_wiki_contents",
+      "Bash(tree:*)"
     ]
   }
 }

@@ -28,3 +28,9 @@ build_log.txt
 app/cache/
 
 # Model files in root (misplaced, should be in assets/models/)
+scripts/
+
+# ONNX models (large files, should be downloaded via convert script)
+*.onnx
+**/models_onnx/*.onnx
+scripts/onnx_models/

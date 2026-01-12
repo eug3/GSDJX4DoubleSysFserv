@@ -91,6 +91,10 @@ dependencies {
     implementation("androidx.browser:browser:1.8.0")
     implementation("org.mozilla.geckoview:geckoview:115.0.20230706202047")
     
+    // ONNX Runtime Mobile for PP-OCRv5
+    implementation(libs.onnxruntime.android)
+    implementation(libs.onnxruntime.extensions.android)
+
     // PaddleOCR - Paddle-Lite v2.14 (自行编译版本，兼容 NDK 29)
     implementation(files("libs/PaddlePredictor.jar"))
 

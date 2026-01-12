@@ -3,6 +3,7 @@ package com.guaishoudejia.x4doublesysfserv
 import android.app.Application
 import android.util.Log
 import com.guaishoudejia.x4doublesysfserv.ocr.OcrHelper
+import com.guaishoudejia.x4doublesysfserv.ocr.OcrEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -48,13 +49,13 @@ class X4Application : Application() {
                     Log.w(TAG, "警告：空闲内存不足 (${freeMemory}MB)，初始化可能失败")
                 }
                 
-                Log.i(TAG, "====== 开始初始化 PaddleOCR ======")
+                Log.i(TAG, "====== 开始初始化 OCR (PP-OCRv5 ONNX) ======")
                 val startTime = System.currentTimeMillis()
-                OcrHelper.init(this@X4Application)
+                OcrHelper.init(this@X4Application, OcrEngine.ONNX_RUNTIME)
                 val duration = System.currentTimeMillis() - startTime
-                Log.i(TAG, "====== PaddleOCR 初始化成功，耗时 ${duration}ms，现在可以使用 OCR ======")
+                Log.i(TAG, "====== OCR 初始化成功，耗时 ${duration}ms，现在可以使用 OCR ======")
             } catch (e: Exception) {
-                Log.e(TAG, "====== PaddleOCR 初始化失败 ======", e)
+                Log.e(TAG, "====== OCR 初始化失败 ======", e)
             }
         }
     }
