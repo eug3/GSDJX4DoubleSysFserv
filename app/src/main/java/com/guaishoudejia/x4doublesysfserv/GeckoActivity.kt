@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
@@ -62,10 +63,12 @@ class GeckoActivity : ComponentActivity() {
     private var runtime: GeckoRuntime? = null
     private var session: GeckoSession? = null
     private var geckoView: GeckoView? = null
+    private var isSessionSharedWithService = false  // 标记 Session 是否已共享给 Service
     private var wakeLock: PowerManager.WakeLock? = null
     private var bleEspClient: BleEspClient? = null
     private lateinit var bleConnectionManager: BleConnectionManager
     private var pendingStartScan = false
+    private var geckoOcrManager: GeckoOcrIntegrationManager? = null
     private val blePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -86,6 +89,14 @@ class GeckoActivity : ComponentActivity() {
     private var isRecognizing by mutableStateOf(false)
     private var ocrResult by mutableStateOf<OcrResult?>(null)
     private var ocrError by mutableStateOf<String?>(null)
+    
+    // Gecko 前台服务 + OCR 状态
+    private var showOcrTextScreen by mutableStateOf(false)
+    private var geckoServiceRunning by mutableStateOf(false)
+    private var geckoOcrProcessing by mutableStateOf(false)
+    private var geckoCurrentPage by mutableIntStateOf(0)
+    private var geckoTotalPages by mutableIntStateOf(0)
+    private val geckoOcrBlocks = mutableStateListOf<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -95,14 +106,43 @@ class GeckoActivity : ComponentActivity() {
 
         // 初始化 BLE 连接管理器
         bleConnectionManager = BleConnectionManager(this, this, lifecycleScope)
+        bleConnectionManager.onCommandReceived = { cmd ->
+            handleBleCommand(cmd)
+        }
 
         // OCR 已在 X4Application 启动时初始化，此处无需再次初始化
         Log.d("GeckoActivity", "OCR 初始化已在应用启动时完成")
+        
+        // 初始化 Gecko 前台服务 + OCR 管理器
+        val ocrHelper = OcrHelper
+        geckoOcrManager = GeckoOcrIntegrationManager(this, this, ocrHelper)
+        geckoOcrManager?.initialize()
+        geckoOcrManager?.onOcrComplete = { blocks ->
+            geckoOcrBlocks.clear()
+            geckoOcrBlocks.addAll(blocks)
+            geckoCurrentPage = geckoOcrManager!!.currentPageIndex.value
+            geckoTotalPages = geckoOcrManager!!.getTotalPages()
+            geckoOcrProcessing = false
+            ocrError = null
+        }
+        geckoOcrManager?.onOcrError = { error ->
+            ocrError = error
+            geckoOcrProcessing = false
+        }
+        geckoOcrManager?.onServiceStateChanged = { isRunning ->
+            geckoServiceRunning = isRunning
+        }
+        geckoOcrManager?.onDispatchKey = { keyCode ->
+            // 发送按键事件到 GeckoView
+            dispatchArrow(keyCode)
+        }
+        Log.d("GeckoActivity", "Gecko OCR 集成管理器已初始化")
 
-        runtime = GeckoRuntime.create(this)
+        // 使用共享的 GeckoRuntime 实例
+        runtime = GeckoRuntimeManager.getRuntime(this)
         val settings = GeckoSessionSettings.Builder()
             .usePrivateMode(false)
-            // .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP) // 统一为桌面模式
+            .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP) // 统一为桌面模式
             .build()
 
         session = GeckoSession(settings).apply {
@@ -170,7 +210,12 @@ class GeckoActivity : ComponentActivity() {
                             releaseWakeLock()
                             renderHistory.clear()
                             bleConnectionManager.disconnect()
-                        }
+                        },
+                        onStartOcr = {
+                            Log.d("GeckoActivity", "从菜单启动 OCR")
+                            launchOcrWithCookieSync(currentUrl)
+                        },
+                        isOcrProcessing = geckoOcrProcessing
                     )
 
                     // 底部：Ebook 控制面板
@@ -207,6 +252,64 @@ class GeckoActivity : ComponentActivity() {
 
                 fullScreenBitmap?.let { bmp ->
                     ZoomableImageOverlay(bitmap = bmp, onClose = { fullScreenBitmap = null })
+                }
+
+                // Gecko 前台服务 + OCR 文本显示屏
+                if (showOcrTextScreen) {
+                    Box(modifier = Modifier.fillMaxSize().background(Color.White)) {
+                        OcrTextDisplayScreen(
+                            currentPageIndex = geckoCurrentPage,
+                            totalPages = geckoTotalPages,
+                            blocks = geckoOcrBlocks,
+                            isLoading = geckoOcrProcessing,
+                            onPreviousPage = {
+                                geckoOcrManager?.previousPage()
+                                // 状态更新会在 onOcrComplete 回调中处理
+                            },
+                            onNextPage = {
+                                geckoOcrManager?.nextPage()
+                                // 状态更新会在 onOcrComplete 回调中处理
+                            },
+                            onClose = {
+                                showOcrTextScreen = false
+                                geckoOcrManager?.stopService()
+
+                                // 停止服务后，恢复 Session 到 GeckoView
+                                isSessionSharedWithService = false
+                                geckoOcrProcessing = false
+
+                                // 延迟以等待 Service 释放 Display 资源，使用重试机制
+                                scope.launch {
+                                    delay(1500)  // 增加延迟到 1500ms
+                                    // 重试多次，直到成功恢复 Session
+                                    for (i in 1..3) {
+                                        if (session != null && geckoView != null) {
+                                            try {
+                                                Log.d("GeckoActivity", "尝试恢复 Session 到 GeckoView (第 $i 次)")
+                                                // 先释放可能存在的旧 Session 绑定
+                                                try {
+                                                    geckoView?.releaseSession()
+                                                } catch (e: Exception) {
+                                                    Log.w("GeckoActivity", "releaseSession error (ignored): ${e.message}")
+                                                }
+                                                // 重新绑定 Session
+                                                geckoView?.setSession(session!!)
+                                                Log.d("GeckoActivity", "Session 恢复成功")
+                                                break
+                                            } catch (e: Exception) {
+                                                Log.w("GeckoActivity", "Session 恢复失败 (第 $i 次): ${e.message}")
+                                                if (i < 3) {
+                                                    delay(500)  // 等待 500ms 后重试
+                                                } else {
+                                                    Log.e("GeckoActivity", "Session 恢复失败，已重试 3 次")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -335,10 +438,10 @@ class GeckoActivity : ComponentActivity() {
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
                 .padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.Start,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(text = "历史: ${renderHistory.size}页", fontSize = 11.sp)
+            Text(text = "历史: ${renderHistory.size}页", fontSize = 11.sp, modifier = Modifier.weight(1f))
         }
 
         // 状态栏
@@ -541,8 +644,220 @@ class GeckoActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        // 关闭 OcrHelper 资源
-        OcrHelper.close()
+
+        val isInteractive = isScreenInteractive()
+        // 只在“熄屏”场景下切换到后台虚拟 Surface 渲染；
+        // 如果只是切到后台但屏幕仍亮，不做自动切换，保持逻辑简单且可控。
+        if (!isInteractive && isEbookMode && !showOcrTextScreen) {
+            try {
+                Log.d("GeckoActivity", "检测到熄屏，切换到 Service 虚拟 Surface 渲染")
+
+                // 将当前 Activity 的 Session 传递给 Service，并从 GeckoView 解绑释放 Display
+                if (!isSessionSharedWithService) {
+                    session?.let { currentSession ->
+                        GeckoForegroundService.setSharedSession(currentSession)
+                        isSessionSharedWithService = true
+                        geckoView?.releaseSession()
+                        Log.d("GeckoActivity", "熄屏：已将 Session 共享给 Service 并释放 GeckoView 占用")
+                    }
+                }
+
+                // 启动后台渲染 + OCR（不弹出 OCR 文本页，等亮屏后需要再展示）
+                if (!geckoServiceRunning) {
+                    // 只启动离屏渲染，不自动 OCR（OCR 由 BLE 外设按需触发）
+                    geckoOcrProcessing = false
+
+                    // 使用真实屏幕尺寸（与 GeckoView 保持一致）
+                    val realWidth = resources.displayMetrics.widthPixels
+                    val realHeight = resources.displayMetrics.heightPixels
+
+                    geckoOcrManager?.startGeckoRendering(
+                        uri = currentUrl.ifBlank { DEFAULT_URL },
+                        width = realWidth,
+                        height = realHeight
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("GeckoActivity", "熄屏自动切换失败: ${e.message}", e)
+            }
+        }
+        
+        // 注意：如果 Session 已共享给 Service，不要 deactivate
+        // Service 会保持 Session active 以便熄屏后继续渲染
+        if (isSessionSharedWithService) {
+            Log.d("GeckoActivity", "Activity onPause - Session 由 Service 管理，保持 active")
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+
+        // 亮屏/回到前台时：如果之前因熄屏把 Session 交给了 Service，则恢复到真实 Surface
+        // 但如果用户正处于 OCR 文本页（showOcrTextScreen=true），则保持 Service 模式不打断。
+        if (isSessionSharedWithService && !showOcrTextScreen) {
+            Log.d("GeckoActivity", "恢复到前台，停止 Service 虚拟 Surface 并恢复 GeckoView")
+            geckoOcrManager?.stopService()
+            geckoOcrProcessing = false
+
+            lifecycleScope.launch {
+                delay(1500)  // 增加延迟到 1500ms
+                // 重试多次，直到成功恢复 Session
+                for (i in 1..3) {
+                    if (session != null && geckoView != null) {
+                        try {
+                            Log.d("GeckoActivity", "尝试恢复 Session 到 GeckoView (第 $i 次)")
+                            // 先释放可能存在的旧 Session 绑定
+                            try {
+                                geckoView?.releaseSession()
+                            } catch (e: Exception) {
+                                Log.w("GeckoActivity", "releaseSession error (ignored): ${e.message}")
+                            }
+                            // 重新绑定 Session
+                            geckoView?.setSession(session!!)
+                            Log.d("GeckoActivity", "Session 恢复成功")
+                            break
+                        } catch (e: Exception) {
+                            Log.w("GeckoActivity", "Session 恢复失败 (第 $i 次): ${e.message}")
+                            if (i < 3) {
+                                delay(500)  // 等待 500ms 后重试
+                            } else {
+                                Log.e("GeckoActivity", "Session 恢复失败，已重试 3 次")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 清除 Service 对共享 Session 的静态引用，避免持有 Activity 生命周期外对象
+            GeckoForegroundService.setSharedSession(null)
+            isSessionSharedWithService = false
+        }
+    }
+
+    private fun isScreenInteractive(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+            pm.isInteractive
+        } else {
+            @Suppress("DEPRECATION")
+            pm.isScreenOn
+        }
+    }
+
+    private fun handleBleCommand(rawCmd: String) {
+        val cmd = rawCmd.trim()
+        if (cmd.isBlank()) return
+
+        // 约定：外设发送 "OCR" 或 "OCR:ONCE" 触发熄屏页 OCR
+        // 兼容："SYNC" 触发原来的亮屏同步逻辑
+        when {
+            cmd.equals("OCR", ignoreCase = true) || cmd.equals("OCR:ONCE", ignoreCase = true) -> {
+                Log.d("GeckoActivity", "BLE 触发 OCR: $cmd")
+                // 熄屏（或 Session 已交给 Service）时，走 Service 单帧抓取+OCR
+                val isInteractive = isScreenInteractive()
+                if (!isInteractive || isSessionSharedWithService) {
+                    geckoOcrProcessing = true
+                    geckoOcrManager?.requestOcrOnce()
+                } else {
+                    // 亮屏时如果你仍想用原来的 Canvas 抓取+OCR，可复用 performSync
+                    // 这里保持简单：直接走 performSync（会抓 Canvas 并 OCR）
+                    performSync(logicalPageIndex)
+                }
+            }
+
+            cmd.equals("SYNC", ignoreCase = true) -> {
+                Log.d("GeckoActivity", "BLE 触发 SYNC")
+                performSync(logicalPageIndex)
+            }
+
+            cmd.startsWith("PAGE:", ignoreCase = true) -> {
+                // 如果外设上报页码，可在这里更新 logicalPageIndex 或触发同步
+                val pageNum = cmd.substringAfter(':', "").toIntOrNull()
+                if (pageNum != null) {
+                    Log.d("GeckoActivity", "BLE 上报页码: $pageNum")
+                    logicalPageIndex = pageNum
+                }
+            }
+
+            else -> {
+                Log.d("GeckoActivity", "未处理的 BLE 命令: $cmd")
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        
+        // 清理共享状态
+        if (isSessionSharedWithService) {
+            GeckoForegroundService.setSharedSession(null)
+            isSessionSharedWithService = false
+            Log.d("GeckoActivity", "Activity onDestroy - 清除 Service 的 Session 引用")
+        }
+        
+        // 清理 Gecko OCR 管理器
+        geckoOcrManager?.cleanup()
+        geckoOcrManager = null
+    }
+
+    /**
+     * 启动 OCR 识别 - 统一使用虚拟屏幕模式
+     * 无论亮屏还是熄屏，都切换到 Service 虚拟屏幕进行 OCR
+     * 这样可以模拟熄屏场景，测试完整的虚拟屏幕流程
+     */
+    private fun launchOcrWithCookieSync(url: String) {
+        Log.d("GeckoActivity", "准备启动 OCR（虚拟屏幕模式）")
+        launchOcrWithService(url)
+    }
+
+    /**
+     * 使用 Service 虚拟屏幕进行 OCR（熄屏场景）
+     */
+    private fun launchOcrWithService(url: String) {
+        Log.d("GeckoActivity", "准备启动 Service 虚拟屏幕 OCR")
+
+        lifecycleScope.launch {
+            try {
+                // 将当前 Activity 的 Session 传递给 Service
+                session?.let { currentSession ->
+                    GeckoForegroundService.setSharedSession(currentSession)
+                    isSessionSharedWithService = true
+                    Log.d("GeckoActivity", "已将 GeckoSession 共享给 Service")
+
+                    // 从 GeckoView 断开 Session，释放 Display 占用
+                    if (geckoView != null) {
+                        geckoView?.releaseSession()
+                        Log.d("GeckoActivity", "已释放 GeckoView 的 Session 占用")
+                    }
+                }
+
+                // 标记 OCR 处理开始
+                geckoOcrProcessing = true
+
+                // 使用真实屏幕尺寸（与 GeckoView 保持一致）
+                val realWidth = resources.displayMetrics.widthPixels
+                val realHeight = resources.displayMetrics.heightPixels
+
+                // 启动 Gecko 前台服务 OCR
+                geckoOcrManager?.startGeckoRendering(
+                    uri = url.ifBlank { DEFAULT_URL },
+                    width = realWidth,
+                    height = realHeight
+                )
+
+                showOcrTextScreen = true
+                Log.d("GeckoActivity", "Service 虚拟屏幕 OCR 启动成功")
+
+            } catch (e: Exception) {
+                Log.e("GeckoActivity", "Service OCR 启动失败: ${e.message}", e)
+                geckoOcrProcessing = false
+                isSessionSharedWithService = false
+                // 出错尝试恢复
+                if (session != null && geckoView != null) {
+                    geckoView?.setSession(session!!)
+                }
+            }
+        }
     }
 
     private fun acquireWakeLock() {

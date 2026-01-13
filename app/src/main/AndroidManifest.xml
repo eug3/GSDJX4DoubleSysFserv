@@ -23,12 +23,16 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- 前台服务权限 (API 31+) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" tools:targetApi="s" />
+    
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
 
     <application
         android:name=".X4Application"
         android:allowBackup="true"
         android:largeHeap="true"
+        android:usesCleartextTraffic="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
@@ -56,6 +60,12 @@
             android:exported="false"
             android:label="阅读器"
             android:theme="@style/Theme.GSDJX4DoubleSysFserv" />
+        
+        <!-- 前台服务：独立 GeckoRuntime + VirtualSurface 离屏渲染 -->
+        <service
+            android:name=".GeckoForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
 
 </manifest>

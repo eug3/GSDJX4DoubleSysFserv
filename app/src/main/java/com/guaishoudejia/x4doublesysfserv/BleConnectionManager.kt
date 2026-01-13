@@ -45,6 +45,12 @@ class BleConnectionManager(
     private var bleClient: BleEspClientOptimized? = null
     private var scanCallback: ScanCallback? = null
 
+    /**
+     * 由调用方注入的命令处理（来自 BLE 外设）。
+     * 例如："SYNC"、"OCR"、"PAGE:xxx" 等。
+     */
+    var onCommandReceived: ((String) -> Unit)? = null
+
     companion object {
         private const val TAG = "BleConnectionManager"
     }
@@ -86,6 +92,7 @@ class BleConnectionManager(
             scope = lifecycleScope,
             onCommand = { cmd ->
                 Log.d(TAG, "收到命令: $cmd")
+                onCommandReceived?.invoke(cmd)
             },
             onStatusChanged = { status ->
                 Log.d(TAG, "BLE 连接状态: $status")
