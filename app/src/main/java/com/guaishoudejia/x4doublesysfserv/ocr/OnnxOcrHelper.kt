@@ -306,8 +306,11 @@ class OnnxOcrHelper {
 
         try {
             // 1. 缩放图像
-            val (scaledBitmap, ratio) = scaleImage(bitmap, DET_LIMIT_SIDE_LEN.toInt())
-            Log.d(TAG, "【检测输入】缩放后图像: ${scaledBitmap.width}x${scaledBitmap.height}, ratio=$ratio")
+            val (scaledBitmap, _, scales) = scaleImage(bitmap, DET_LIMIT_SIDE_LEN.toInt())
+            val scaleX = scales.first
+            val scaleY = scales.second
+            Log.d(TAG, "【检测输入】缩放后图像: ${scaledBitmap.width}x${scaledBitmap.height}")
+            Log.d(TAG, "【检测输入】缩放比例: scaleX=$scaleX, scaleY=$scaleY")
 
             // 2. 预处理
             val inputData = preprocessImage(scaledBitmap)
@@ -354,7 +357,7 @@ class OnnxOcrHelper {
             }
 
             val boxes = postprocessDetection(
-                outputData, outputShape, bitmap.width, bitmap.height, ratio
+                outputData, outputShape, bitmap.width, bitmap.height, scaleX, scaleY
             )
 
             // 清理
@@ -511,7 +514,7 @@ class OnnxOcrHelper {
      * - 始终确保宽高能被 32 整除
      * - 保持宽高比
      */
-    private fun scaleImage(bitmap: Bitmap, maxSideLen: Int): Pair<Bitmap, Float> {
+    private fun scaleImage(bitmap: Bitmap, maxSideLen: Int): Triple<Bitmap, Float, Pair<Float, Float>> {
         val width = bitmap.width
         val height = bitmap.height
         val maxSide = max(width, height)
@@ -530,18 +533,20 @@ class OnnxOcrHelper {
         val alignedWidth = ((scaledWidth + 31) / 32) * 32
         val alignedHeight = ((scaledHeight + 31) / 32) * 32
 
-        // 计算实际比例（用于坐标映射）
-        val ratio = alignedWidth.toFloat() / width
+        // 计算实际缩放比例（宽高分别计算）
+        val scaleX = alignedWidth.toFloat() / width
+        val scaleY = alignedHeight.toFloat() / height
 
         if (scale == 1f && alignedWidth == width && alignedHeight == height) {
             Log.d(TAG, "【检测输入】无需调整: ${width}x${height}")
-            return Pair(bitmap, 1f)
+            return Triple(bitmap, 1f, Pair(scaleX, scaleY))
         }
 
-        Log.d(TAG, "【检测输入】原始: ${width}x${height} -> 对齐: ${alignedWidth}x${alignedHeight}, ratio=$ratio")
+        Log.d(TAG, "【检测输入】原始: ${width}x${height} -> 对齐: ${alignedWidth}x${alignedHeight}")
+        Log.d(TAG, "【检测输入】缩放比例: scaleX=$scaleX, scaleY=$scaleY")
 
         val scaled = Bitmap.createScaledBitmap(bitmap, alignedWidth, alignedHeight, true)
-        return Pair(scaled, ratio)
+        return Triple(scaled, 1f, Pair(scaleX, scaleY))
     }
 
     /**
@@ -585,7 +590,8 @@ class OnnxOcrHelper {
         shape: LongArray,
         srcWidth: Int,
         srcHeight: Int,
-        scaleRatio: Float
+        scaleX: Float,
+        scaleY: Float
     ): List<Array<Point>> {
         val batch = shape[0].toInt()
         val channels = shape[1].toInt()
@@ -656,14 +662,14 @@ class OnnxOcrHelper {
             val compArea = compW * compH
 
             if (compArea >= 30 && component.size >= 15) {
-                // 还原到原图坐标并添加扩展
+                // 还原到原图坐标并添加扩展（使用正确的宽高缩放比例）
                 val expandX = max(4, ((maxX - minX) * 0.08f).toInt())
                 val expandY = max(12, ((maxY - minY) * 0.40f).toInt())
 
-                val realMinX = max(0, (minX / scaleRatio).toInt() - expandX)
-                val realMinY = max(0, (minY / scaleRatio).toInt() - expandY)
-                val realMaxX = min(srcWidth - 1, (maxX / scaleRatio).toInt() + expandX)
-                val realMaxY = min(srcHeight - 1, (maxY / scaleRatio).toInt() + expandY)
+                val realMinX = max(0, (minX / scaleX).toInt() - expandX)
+                val realMinY = max(0, (minY / scaleY).toInt() - expandY)
+                val realMaxX = min(srcWidth - 1, (maxX / scaleX).toInt() + expandX)
+                val realMaxY = min(srcHeight - 1, (maxY / scaleY).toInt() + expandY)
 
                 boxes.add(arrayOf(
                     Point(realMinX, realMinY),

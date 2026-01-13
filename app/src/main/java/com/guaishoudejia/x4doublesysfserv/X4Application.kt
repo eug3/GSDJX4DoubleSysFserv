@@ -3,7 +3,6 @@ package com.guaishoudejia.x4doublesysfserv
 import android.app.Application
 import android.util.Log
 import com.guaishoudejia.x4doublesysfserv.ocr.OcrHelper
-import com.guaishoudejia.x4doublesysfserv.ocr.OcrEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -51,7 +50,7 @@ class X4Application : Application() {
                 
                 Log.i(TAG, "====== 开始初始化 OCR (PP-OCRv5 ONNX) ======")
                 val startTime = System.currentTimeMillis()
-                OcrHelper.init(this@X4Application, OcrEngine.ONNX_RUNTIME)
+                OcrHelper.init(this@X4Application)
                 val duration = System.currentTimeMillis() - startTime
                 Log.i(TAG, "====== OCR 初始化成功，耗时 ${duration}ms，现在可以使用 OCR ======")
             } catch (e: Exception) {
