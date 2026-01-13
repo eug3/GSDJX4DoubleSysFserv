@@ -273,20 +273,15 @@ class OnnxOcrHelper {
                 }
             }
 
-            // 3. 构建返回结果
-            val blocks = mutableListOf<TextBlock>()
-            val textLines = mutableListOf<String>()
+            // 3. 段落分组（每个段落已合并为完整文本）
+            val blocks = groupTextByParagraphs(results)
 
-            results.forEachIndexed { index, result ->
-                val text = result.getLabel() ?: ""
-                val confidence = result.getConfidence()
-                blocks.add(TextBlock(text, confidence, index))
-                if (text.isNotEmpty()) {
-                    textLines.add(text)
-                }
+            // 4. 构建返回结果
+            blocks.forEachIndexed { index, block ->
+                Log.d(TAG, "段落 $index: ${block.text} (置信度: ${block.confidence})")
             }
 
-            val formattedText = textLines.joinToString("\n")
+            val formattedText = blocks.joinToString("\n\n") { it.text }
             binaryBitmap.recycle()
             OcrResult(formattedText, blocks, formattedText)
 
@@ -295,6 +290,95 @@ class OnnxOcrHelper {
             throw e
         }
     }
+
+    /**
+     * 根据坐标信息将文本分组为段落
+     *
+     * 段落分组逻辑（OCR 工程常用）：
+     * - gap = 当前行 top_y - 上一行 bottom_y
+     * - avg_height = 两行行高的平均值
+     * - gap ≤ 1.0 × avg_height → 同段落
+     * - gap ≥ 1.2 × avg_height → 新段落
+     * - 中间区域（1.0～1.2）可以根据需求调节
+     */
+    private fun groupTextByParagraphs(results: List<OcrResultModel>): List<TextBlock> {
+        if (results.isEmpty()) return emptyList()
+
+        // 1. 计算每个文本块的边界（topY, bottomY, height）
+        val textItems = results.mapNotNull { result ->
+            val points = result.points  // 通过 getter 访问
+            if (points.isEmpty()) return@mapNotNull null
+
+            val minY = points.minOf { it.y }
+            val maxY = points.maxOf { it.y }
+            val text = result.getLabel() ?: ""
+
+            if (text.isEmpty()) return@mapNotNull null
+
+            TextItem(
+                text = text,
+                confidence = result.getConfidence(),
+                topY = minY,
+                bottomY = maxY,
+                height = maxY - minY + 1
+            )
+        }
+
+        if (textItems.isEmpty()) return emptyList()
+
+        // 2. 按 topY 排序（从上到下）
+        val sortedItems = textItems.sortedBy { it.topY }
+
+        // 3. 段落分组
+        val paragraphs = mutableListOf<List<TextItem>>()
+        var currentParagraph = mutableListOf(sortedItems.first())
+
+        for (i in 1 until sortedItems.size) {
+            val current = sortedItems[i]
+            val previous = sortedItems[i - 1]
+
+            val gap = current.topY - previous.bottomY
+            val avgHeight = (current.height + previous.height) / 2f
+
+            // 根据间距判断是否同一段落
+            if (gap <= 1.0f * avgHeight) {
+                // 同段落
+                currentParagraph.add(current)
+            } else if (gap >= 1.2f * avgHeight) {
+                // 新段落
+                paragraphs.add(currentParagraph)
+                currentParagraph = mutableListOf(current)
+            } else {
+                // 中间区域：根据文字内容判断（如果当前行有前一行的后续字符特征则合并）
+                // 这里采用保守策略，视为新段落
+                paragraphs.add(currentParagraph)
+                currentParagraph = mutableListOf(current)
+            }
+        }
+
+        // 添加最后一个段落
+        if (currentParagraph.isNotEmpty()) {
+            paragraphs.add(currentParagraph)
+        }
+
+        // 4. 构建返回结果
+        return paragraphs.mapIndexed { index, items ->
+            val paragraphText = items.joinToString("") { it.text }
+            val avgConfidence = items.map { it.confidence }.average().toFloat()
+            TextBlock(paragraphText, avgConfidence, index)
+        }
+    }
+
+    /**
+     * 文本项数据结构（用于段落分组）
+     */
+    private data class TextItem(
+        val text: String,
+        val confidence: Float,
+        val topY: Int,
+        val bottomY: Int,
+        val height: Int
+    )
 
     /**
      * 文本检测
