@@ -335,19 +335,22 @@ class OnnxOcrHelper {
             val outputShape = outputTensor.info.shape
             Log.d(TAG, "检测输出形状: [${outputShape.joinToString(", ")}]")
 
-            val outputData = when (val outputValue = outputTensor.value) {
-                is ByteBuffer -> {
-                    val floatBuffer = outputValue.asFloatBuffer()
-                    FloatArray(floatBuffer.remaining()).also { floatBuffer.get(it) }
+            val outputData: FloatArray = try {
+                when (val outputValue = outputTensor.value) {
+                    is ByteBuffer -> {
+                        val floatBuffer = outputValue.asFloatBuffer()
+                        FloatArray(floatBuffer.remaining()).also { floatBuffer.get(it) }
+                    }
+                    is FloatArray -> outputValue
+                    is Array<*> -> flattenFloatArray(outputValue)
+                    else -> {
+                        Log.w(TAG, "未知的输出数据类型: ${outputValue?.javaClass?.simpleName}")
+                        floatArrayOf()
+                    }
                 }
-                is Array<*> -> {
-                    // 处理多维数组 float[][][][] 或其他形式
-                    flattenFloatArray(outputValue)
-                }
-                else -> {
-                    Log.w(TAG, "未知的输出数据类型: ${outputValue?.javaClass?.simpleName}")
-                    floatArrayOf()
-                }
+            } catch (e: Exception) {
+                Log.e(TAG, "处理输出张量失败", e)
+                floatArrayOf()
             }
 
             val boxes = postprocessDetection(
@@ -446,6 +449,7 @@ class OnnxOcrHelper {
 
     /**
      * 预处理图像（检测用）- RGB 顺序，归一化到 [0, 1]
+     * 注意：PP-OCRv5 检测模型通常使用 BGR 顺序
      */
     private fun preprocessImage(bitmap: Bitmap): FloatArray {
         val width = bitmap.width
@@ -458,11 +462,12 @@ class OnnxOcrHelper {
 
         for (i in pixels.indices) {
             val pixel = pixels[i]
-            // RGB 顺序（与 v3 一致）
+            // PP-OCRv5 检测模型通常使用 BGR 顺序
             val r = ((pixel shr 16) and 0xFF).toFloat() / 255f
             val g = ((pixel shr 8) and 0xFF).toFloat() / 255f
             val b = (pixel and 0xFF).toFloat() / 255f
 
+            // 保持 RGB 顺序（与原 Paddle-Lite 一致）
             floatArray[i] = r
             floatArray[i + channelSize] = g
             floatArray[i + channelSize * 2] = b
@@ -501,22 +506,41 @@ class OnnxOcrHelper {
     }
 
     /**
-     * 缩放图像
+     * 调整图像尺寸以适配 ONNX 模型
+     * - 图像尺寸超出 2048 时才缩放
+     * - 始终确保宽高能被 32 整除
+     * - 保持宽高比
      */
     private fun scaleImage(bitmap: Bitmap, maxSideLen: Int): Pair<Bitmap, Float> {
         val width = bitmap.width
         val height = bitmap.height
         val maxSide = max(width, height)
 
-        if (maxSide <= maxSideLen) {
+        // 计算缩放比例（只有超大图片才缩放）
+        val scale = if (maxSide > 2048) {
+            2048f / maxSide
+        } else {
+            1f
+        }
+
+        val scaledWidth = (width * scale).toInt()
+        val scaledHeight = (height * scale).toInt()
+
+        // 对齐到 32 的倍数
+        val alignedWidth = ((scaledWidth + 31) / 32) * 32
+        val alignedHeight = ((scaledHeight + 31) / 32) * 32
+
+        // 计算实际比例（用于坐标映射）
+        val ratio = alignedWidth.toFloat() / width
+
+        if (scale == 1f && alignedWidth == width && alignedHeight == height) {
+            Log.d(TAG, "【检测输入】无需调整: ${width}x${height}")
             return Pair(bitmap, 1f)
         }
 
-        val ratio = maxSideLen.toFloat() / maxSide
-        val newWidth = (width * ratio).toInt()
-        val newHeight = (height * ratio).toInt()
+        Log.d(TAG, "【检测输入】原始: ${width}x${height} -> 对齐: ${alignedWidth}x${alignedHeight}, ratio=$ratio")
 
-        val scaled = Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
+        val scaled = Bitmap.createScaledBitmap(bitmap, alignedWidth, alignedHeight, true)
         return Pair(scaled, ratio)
     }
 
@@ -830,6 +854,7 @@ class OnnxOcrHelper {
 
     /**
      * 二值化处理 - 纯 Kotlin 实现，无需 OpenCV
+     * 使用顶部 10 个像素作为背景色参考
      */
     suspend fun binarizeBitmap(bitmap: Bitmap): Bitmap = withContext(Dispatchers.IO) {
         val width = bitmap.width
@@ -837,72 +862,50 @@ class OnnxOcrHelper {
         val pixels = IntArray(width * height)
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
-        // 提取灰度值
-        val grayValues = IntArray(width * height)
+        // 1. 采样顶部 10 个像素作为背景色参考
+        val bgSampleCount = minOf(10, width * height)
+        var bgR = 0L
+        var bgG = 0L
+        var bgB = 0L
+
+        for (i in 0 until bgSampleCount) {
+            val pixel = pixels[i]
+            bgR += (pixel shr 16) and 0xFF
+            bgG += (pixel shr 8) and 0xFF
+            bgB += pixel and 0xFF
+        }
+        bgR = bgR / bgSampleCount
+        bgG = bgG / bgSampleCount
+        bgB = bgB / bgSampleCount
+
+        Log.d(TAG, "【二值化】背景色参考: R=$bgR, G=$bgG, B=$bgB")
+
+        // 2. 计算每个像素与背景色的差异
+        // 使用人眼敏感的灰度公式转换差异
+        val threshold = 15  // 差异阈值，可调整
+
+        // 3. 应用二值化
+        val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         for (i in pixels.indices) {
             val pixel = pixels[i]
-            // 使用人眼敏感的灰度公式: r*0.299 + g*0.587 + b*0.114
-            grayValues[i] = ((pixel shr 16 and 0xFF) * 299 +
-                            (pixel shr 8 and 0xFF) * 587 +
-                            (pixel and 0xFF) * 114) / 1000
-        }
+            val r = (pixel shr 16) and 0xFF
+            val g = (pixel shr 8) and 0xFF
+            val b = pixel and 0xFF
 
-        // OTSU 自动阈值计算
-        val threshold = calculateOtsuThreshold(grayValues, width, height)
+            // 计算与背景色的欧氏距离
+            val diff = kotlin.math.sqrt(
+                ((r - bgR) * (r - bgR) +
+                (g - bgG) * (g - bgG) +
+                (b - bgB) * (b - bgB)).toDouble()
+            ).toInt()
 
-        // 应用二值化
-        val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        for (i in grayValues.indices) {
-            val value = if (grayValues[i] > threshold) 0xFFFFFFFF.toInt() else 0xFF000000.toInt()
+            // 差异大于阈值为文字（黑色），否则为背景（白色）
+            val value = if (diff > threshold) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
             pixels[i] = value
         }
         result.setPixels(pixels, 0, width, 0, 0, width, height)
 
         result
-    }
-
-    /**
-     * OTSU 自动阈值算法 - 纯 Kotlin 实现
-     */
-    private fun calculateOtsuThreshold(grayValues: IntArray, width: Int, height: Int): Int {
-        val total = width * height
-        val histogram = IntArray(256)
-        for (gray in grayValues) {
-            histogram[gray.coerceIn(0, 255)]++
-        }
-
-        var sum = 0
-        for (i in 0..255) {
-            sum += i * histogram[i]
-        }
-
-        var sumB = 0
-        var wB = 0
-        var wF: Int
-        var maxVariance = 0.0
-        var threshold = 0
-
-        for (t in 0..255) {
-            wB += histogram[t]
-            if (wB == 0) continue
-
-            wF = total - wB
-            if (wF == 0) break
-
-            sumB += t * histogram[t]
-
-            val mB = sumB.toDouble() / wB
-            val mF = (sum - sumB).toDouble() / wF
-
-            val variance = wB.toDouble() * wF * (mB - mF) * (mB - mF)
-
-            if (variance > maxVariance) {
-                maxVariance = variance
-                threshold = t
-            }
-        }
-
-        return threshold
     }
 
     /**

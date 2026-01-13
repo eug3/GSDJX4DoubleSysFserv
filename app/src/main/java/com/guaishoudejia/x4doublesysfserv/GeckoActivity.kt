@@ -102,7 +102,7 @@ class GeckoActivity : ComponentActivity() {
         runtime = GeckoRuntime.create(this)
         val settings = GeckoSessionSettings.Builder()
             .usePrivateMode(false)
-            .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP) // 统一为桌面模式
+            // .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP) // 统一为桌面模式
             .build()
 
         session = GeckoSession(settings).apply {
