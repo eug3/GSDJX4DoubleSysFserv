@@ -116,6 +116,18 @@ class GeckoForegroundService : Service() {
         val action = intent?.action
         Log.d(TAG, "onStartCommand: action=$action")
         
+        // 立即启动前台服务通知（Android 要求）
+        try {
+            Log.d(TAG, "Creating notification...")
+            val notification = createNotification()
+            Log.d(TAG, "Calling startForeground() with notification ID=$NOTIFICATION_ID")
+            startForeground(NOTIFICATION_ID, notification)
+            Log.d(TAG, "startForeground() called successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground service", e)
+            // 即使失败也继续执行，因为某些设备可能有限制
+        }
+        
         when (action) {
             ACTION_START_RENDER -> {
                 val uri = intent?.getStringExtra(EXTRA_URI) ?: "about:blank"
@@ -138,12 +150,6 @@ class GeckoForegroundService : Service() {
                     Log.w(TAG, "Capture requested but service is not rendering")
                 }
             }
-        }
-        
-        // 启动前台通知
-        if (!isRunning.get()) {
-            val notification = createNotification()
-            startForeground(NOTIFICATION_ID, notification)
         }
         
         return START_STICKY
@@ -369,10 +375,10 @@ class GeckoForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Gecko Render Service",
+                "微信读书 OCR 服务",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Renders web content using Gecko engine"
+                description = "后台渲染网页并进行 OCR 识别"
                 setShowBadge(false)
             }
             
@@ -391,8 +397,8 @@ class GeckoForegroundService : Service() {
         )
         
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Gecko Render Service")
-            .setContentText("Rendering web content...")
+            .setContentTitle("微信读书服务")
+            .setContentText("正在后台渲染页面...")
             .setSmallIcon(android.R.drawable.ic_notification_clear_all)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -564,22 +570,60 @@ class GeckoForegroundService : Service() {
             }
             timeoutHandler.postDelayed(timeoutRunnable, timeoutMs)
 
-            // 执行 JS 注入
+            // 执行 JS 注入 - 轮询等待 Canvas 渲染，Canvas 需要足够时间完成绘制
+            // 微信读书使用 Canvas 而非 HTML 文本渲染，需要耐心等待
             val jsCode = """
                 (function() {
-                    try {
-                        var canvas = document.querySelector('canvas') ||
-                            document.querySelector('.readerContent_container canvas') ||
-                            document.querySelector('#canvas');
-                        if (!canvas) {
-                            location.href = 'x4bmp://ERROR';
-                            return;
+                    var maxAttempts = 75;
+                    var interval = 200;
+                    var attempts = 0;
+                    
+                    function tryCapture() {
+                        try {
+                            var canvas = document.querySelector('canvas');
+                            if (!canvas) {
+                                attempts++;
+                                if (attempts < maxAttempts) {
+                                    setTimeout(tryCapture, interval);
+                                } else {
+                                    location.href = 'x4bmp://ERROR';
+                                }
+                                return;
+                            }
+                            
+                            if (canvas.width <= 0 || canvas.height <= 0) {
+                                attempts++;
+                                if (attempts < maxAttempts) {
+                                    setTimeout(tryCapture, interval);
+                                } else {
+                                    location.href = 'x4bmp://ERROR';
+                                }
+                                return;
+                            }
+                            
+                            var data = canvas.toDataURL('image/png').split(',')[1];
+                            if (!data || data.length < 100) {
+                                attempts++;
+                                if (attempts < maxAttempts) {
+                                    setTimeout(tryCapture, interval);
+                                } else {
+                                    location.href = 'x4bmp://ERROR';
+                                }
+                                return;
+                            }
+                            
+                            location.href = 'x4bmp://' + data;
+                        } catch(e) {
+                            attempts++;
+                            if (attempts < maxAttempts) {
+                                setTimeout(tryCapture, interval);
+                            } else {
+                                location.href = 'x4bmp://ERROR';
+                            }
                         }
-                        var data = canvas.toDataURL('image/png').split(',')[1];
-                        location.href = 'x4bmp://' + data;
-                    } catch(e) {
-                        location.href = 'x4bmp://ERROR';
                     }
+                    
+                    tryCapture();
                 })();
             """.trimIndent().replace("\n", "").replace("    ", " ")
 

@@ -6,8 +6,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import android.os.PowerManager
+import android.util.Log
 import android.view.KeyEvent
 import android.net.Uri
 import androidx.activity.ComponentActivity
@@ -624,17 +624,60 @@ class GeckoActivity : ComponentActivity() {
                 override fun onSecurityChange(session: GeckoSession, info: GeckoSession.ProgressDelegate.SecurityInformation) {}
             }
 
-            // 核心脚本：自动识别微信读书的 Canvas 并截图回传
+            // 核心脚本：轮询等待 Canvas 渲染，Canvas 需要足够时间完成绘制
+            // 微信读书使用 Canvas 而非 HTML 文本渲染，需要耐心等待
             val jsCode = """
                 (function() {
-                    try {
-                        var canvas = document.querySelector('canvas') || document.querySelector('.readerContent_container canvas');
-                        if (!canvas) { location.href = 'x4bmp://ERROR'; return; }
-                        var data = canvas.toDataURL('image/png').split(',')[1];
-                        location.href = 'x4bmp://' + data;
-                    } catch(e) {
-                        location.href = 'x4bmp://ERROR';
+                    var maxAttempts = 75;
+                    var interval = 200;
+                    var attempts = 0;
+                    
+                    function tryCapture() {
+                        try {
+                            var canvas = document.querySelector('canvas');
+                            if (!canvas) {
+                                attempts++;
+                                if (attempts < maxAttempts) {
+                                    setTimeout(tryCapture, interval);
+                                } else {
+                                    location.href = 'x4bmp://ERROR';
+                                }
+                                return;
+                            }
+                            
+                            if (canvas.width <= 0 || canvas.height <= 0) {
+                                attempts++;
+                                if (attempts < maxAttempts) {
+                                    setTimeout(tryCapture, interval);
+                                } else {
+                                    location.href = 'x4bmp://ERROR';
+                                }
+                                return;
+                            }
+                            
+                            var data = canvas.toDataURL('image/png').split(',')[1];
+                            if (!data || data.length < 100) {
+                                attempts++;
+                                if (attempts < maxAttempts) {
+                                    setTimeout(tryCapture, interval);
+                                } else {
+                                    location.href = 'x4bmp://ERROR';
+                                }
+                                return;
+                            }
+                            
+                            location.href = 'x4bmp://' + data;
+                        } catch(e) {
+                            attempts++;
+                            if (attempts < maxAttempts) {
+                                setTimeout(tryCapture, interval);
+                            } else {
+                                location.href = 'x4bmp://ERROR';
+                            }
+                        }
                     }
+                    
+                    tryCapture();
                 })();
             """.trimIndent().replace("\n", "").replace("    ", " ")
             Log.d("CAPTURE", "执行 JS")
@@ -652,13 +695,23 @@ class GeckoActivity : ComponentActivity() {
             try {
                 Log.d("GeckoActivity", "检测到熄屏，切换到 Service 虚拟 Surface 渲染")
 
-                // 将当前 Activity 的 Session 传递给 Service，并从 GeckoView 解绑释放 Display
+                // 将当前 Activity 的 Session 传递给 Service
                 if (!isSessionSharedWithService) {
                     session?.let { currentSession ->
                         GeckoForegroundService.setSharedSession(currentSession)
                         isSessionSharedWithService = true
-                        geckoView?.releaseSession()
-                        Log.d("GeckoActivity", "熄屏：已将 Session 共享给 Service 并释放 GeckoView 占用")
+                        
+                        // 隐藏 GeckoView，让它在后台继续渲染
+                        try {
+                            if (geckoView != null) {
+                                geckoView?.visibility = android.view.View.GONE
+                                Log.d("GeckoActivity", "熄屏：GeckoView 已隐藏（保持 attached）")
+                            }
+                        } catch (e: Exception) {
+                            Log.w("GeckoActivity", "Hide geckoview error: ${e.message}")
+                        }
+                        
+                        Log.d("GeckoActivity", "熄屏：已将 Session 共享给 Service")
                     }
                 }
 
@@ -695,42 +748,27 @@ class GeckoActivity : ComponentActivity() {
         // 亮屏/回到前台时：如果之前因熄屏把 Session 交给了 Service，则恢复到真实 Surface
         // 但如果用户正处于 OCR 文本页（showOcrTextScreen=true），则保持 Service 模式不打断。
         if (isSessionSharedWithService && !showOcrTextScreen) {
-            Log.d("GeckoActivity", "恢复到前台，停止 Service 虚拟 Surface 并恢复 GeckoView")
+            Log.d("GeckoActivity", "恢复到前台，停止 Service 并显示 GeckoView")
+            
+            // 停止后台服务
             geckoOcrManager?.stopService()
             geckoOcrProcessing = false
-
-            lifecycleScope.launch {
-                delay(1500)  // 增加延迟到 1500ms
-                // 重试多次，直到成功恢复 Session
-                for (i in 1..3) {
-                    if (session != null && geckoView != null) {
-                        try {
-                            Log.d("GeckoActivity", "尝试恢复 Session 到 GeckoView (第 $i 次)")
-                            // 先释放可能存在的旧 Session 绑定
-                            try {
-                                geckoView?.releaseSession()
-                            } catch (e: Exception) {
-                                Log.w("GeckoActivity", "releaseSession error (ignored): ${e.message}")
-                            }
-                            // 重新绑定 Session
-                            geckoView?.setSession(session!!)
-                            Log.d("GeckoActivity", "Session 恢复成功")
-                            break
-                        } catch (e: Exception) {
-                            Log.w("GeckoActivity", "Session 恢复失败 (第 $i 次): ${e.message}")
-                            if (i < 3) {
-                                delay(500)  // 等待 500ms 后重试
-                            } else {
-                                Log.e("GeckoActivity", "Session 恢复失败，已重试 3 次")
-                            }
-                        }
-                    }
+            
+            // 显示 GeckoView
+            try {
+                if (geckoView != null) {
+                    geckoView?.visibility = android.view.View.VISIBLE
+                    Log.d("GeckoActivity", "GeckoView 已显示")
                 }
+            } catch (e: Exception) {
+                Log.w("GeckoActivity", "Show geckoview error: ${e.message}")
             }
+            
+            isSessionSharedWithService = false
+            Log.d("GeckoActivity", "Session 恢复到前台 GeckoView")
 
             // 清除 Service 对共享 Session 的静态引用，避免持有 Activity 生命周期外对象
             GeckoForegroundService.setSharedSession(null)
-            isSessionSharedWithService = false
         }
     }
 
@@ -807,6 +845,16 @@ class GeckoActivity : ComponentActivity() {
      */
     private fun launchOcrWithCookieSync(url: String) {
         Log.d("GeckoActivity", "准备启动 OCR（虚拟屏幕模式）")
+        
+        // Android 13+ 需要通知权限
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != 
+                android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                Log.d("GeckoActivity", "请求通知权限")
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 100)
+            }
+        }
+        
         launchOcrWithService(url)
     }
 
@@ -822,13 +870,20 @@ class GeckoActivity : ComponentActivity() {
                 session?.let { currentSession ->
                     GeckoForegroundService.setSharedSession(currentSession)
                     isSessionSharedWithService = true
-                    Log.d("GeckoActivity", "已将 GeckoSession 共享给 Service")
-
-                    // 从 GeckoView 断开 Session，释放 Display 占用
-                    if (geckoView != null) {
-                        geckoView?.releaseSession()
-                        Log.d("GeckoActivity", "已释放 GeckoView 的 Session 占用")
+                    
+                    // 不释放 Session，而是隐藏 GeckoView
+                    // GeckoView 保持 attached to window，但不显示
+                    // 这样 GeckoSession 在后台继续渲染，Canvas 可以被 Service 捕获
+                    try {
+                        if (geckoView != null) {
+                            geckoView?.visibility = android.view.View.GONE
+                            Log.d("GeckoActivity", "GeckoView 已隐藏（保持 attached 以维持渲染）")
+                        }
+                    } catch (e: Exception) {
+                        Log.w("GeckoActivity", "Hide geckoview error: ${e.message}")
                     }
+                    
+                    Log.d("GeckoActivity", "已将 GeckoSession 共享给 Service")
                 }
 
                 // 标记 OCR 处理开始

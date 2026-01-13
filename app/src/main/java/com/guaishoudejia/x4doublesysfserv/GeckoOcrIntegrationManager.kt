@@ -125,18 +125,28 @@ class GeckoOcrIntegrationManager(
             onOcrError?.invoke("Service 未运行")
             return
         }
-        Log.d(TAG, "Requesting OCR via JS injection")
+        
+        // 立即标记为处理中，避免重复请求
+        isOcrProcessing.value = true
+        Log.d(TAG, "Requesting OCR via JS injection (isOcrProcessing=true)")
 
         // 通过 Service 的 Binder 直接调用 JS 注入截图
         val binder = serviceManager?.getBinder()
-        binder?.requestCaptureViaJs(timeoutMs = 15000) { bitmap ->
+        if (binder == null) {
+            Log.e(TAG, "Binder is null, cannot request OCR")
+            isOcrProcessing.value = false
+            onOcrError?.invoke("Service 未连接")
+            return
+        }
+        
+        binder.requestCaptureViaJs(timeoutMs = 15000) { bitmap ->
             if (bitmap != null) {
                 Log.d(TAG, "JS capture success: ${bitmap.width}x${bitmap.height}")
                 lifecycleOwner.lifecycleScope.launch {
                     processFrameWithOcr(bitmap)
                 }
             } else {
-                Log.e(TAG, "JS capture failed")
+                Log.e(TAG, "JS capture failed, resetting isOcrProcessing")
                 onOcrError?.invoke("截图失败")
                 isOcrProcessing.value = false
             }
@@ -151,7 +161,7 @@ class GeckoOcrIntegrationManager(
         
         lifecycleOwner.lifecycleScope.launch(Dispatchers.Default) {
             try {
-                isOcrProcessing.value = true
+                // isOcrProcessing 已经在 requestOcrOnce() 中设置为 true
 
                 // 进行 OCR 识别
                 val ocrResult = withContext(Dispatchers.Default) {
@@ -235,6 +245,7 @@ class GeckoOcrIntegrationManager(
         }
     }
 
+
     /**
      * 翻到上一页（发送左箭头键并重新 OCR）
      */
@@ -242,10 +253,11 @@ class GeckoOcrIntegrationManager(
         Log.d(TAG, "Previous page: sending LEFT arrow")
         dispatchKeyToSession(KeyEvent.KEYCODE_DPAD_LEFT)
 
-        // 延迟等待翻页完成后触发 OCR
+        // 延迟等待翻页完成后触发 OCR，增加等待时间以确保 Canvas 完全更新
         lifecycleOwner.lifecycleScope.launch {
-            delay(800)  // 等待翻页动画
-            requestOcrOnce()
+            delay(2000)  // 增加等待时间到 2000ms，确保页面翻转和 Canvas 重新渲染完成
+            // 添加重试机制，确保 OCR 成功
+            retryRequestOcrOnce(maxAttempts = 3, delayBetweenRetries = 500)
         }
     }
 
@@ -256,10 +268,83 @@ class GeckoOcrIntegrationManager(
         Log.d(TAG, "Next page: sending RIGHT arrow")
         dispatchKeyToSession(KeyEvent.KEYCODE_DPAD_RIGHT)
 
-        // 延迟等待翻页完成后触发 OCR
+        // 延迟等待翻页完成后触发 OCR，增加等待时间以确保 Canvas 完全更新
         lifecycleOwner.lifecycleScope.launch {
-            delay(800)  // 等待翻页动画
-            requestOcrOnce()
+            delay(2000)  // 增加等待时间到 2000ms，确保页面翻转和 Canvas 重新渲染完成
+            // 添加重试机制，确保 OCR 成功
+            retryRequestOcrOnce(maxAttempts = 3, delayBetweenRetries = 500)
+        }
+    }
+
+    /**
+     * 重试 OCR 识别（如果第一次失败则重试）
+     * 使用简单的延迟 + 回调方式实现重试
+     */
+    private fun retryRequestOcrOnce(maxAttempts: Int = 2, delayBetweenRetries: Long = 300, attemptNum: Int = 1) {
+        // 检查是否已经在处理 OCR
+        if (isOcrProcessing.value && attemptNum == 1) {
+            Log.d(TAG, "OCR already in progress, skipping retry mechanism")
+            return
+        }
+        
+        if (!isServiceRunning.value) {
+            Log.w(TAG, "Service not running, cannot request OCR (attempt $attemptNum/$maxAttempts)")
+            if (attemptNum < maxAttempts) {
+                lifecycleOwner.lifecycleScope.launch {
+                    delay(delayBetweenRetries)
+                    retryRequestOcrOnce(maxAttempts, delayBetweenRetries, attemptNum + 1)
+                }
+            } else {
+                Log.e(TAG, "OCR failed after $maxAttempts attempts: Service 未运行")
+                onOcrError?.invoke("OCR 失败：Service 未运行")
+                isOcrProcessing.value = false
+            }
+            return
+        }
+        
+        Log.d(TAG, "Requesting OCR (attempt $attemptNum/$maxAttempts)")
+        
+        // 通过 Service 的 Binder 直接调用 JS 注入截图
+        val binder = serviceManager?.getBinder()
+        if (binder == null) {
+            Log.w(TAG, "Binder is null (attempt $attemptNum/$maxAttempts)")
+            if (attemptNum < maxAttempts) {
+                lifecycleOwner.lifecycleScope.launch {
+                    delay(delayBetweenRetries)
+                    retryRequestOcrOnce(maxAttempts, delayBetweenRetries, attemptNum + 1)
+                }
+            } else {
+                Log.e(TAG, "OCR failed after $maxAttempts attempts: Binder 为 null")
+                onOcrError?.invoke("OCR 失败：无法连接服务")
+                isOcrProcessing.value = false
+            }
+            return
+        }
+        
+        // 设置处理标志
+        isOcrProcessing.value = true
+        
+        binder.requestCaptureViaJs(timeoutMs = 10000) { bitmap ->
+            if (bitmap != null) {
+                Log.d(TAG, "OCR capture success on attempt $attemptNum: ${bitmap.width}x${bitmap.height}")
+                lifecycleOwner.lifecycleScope.launch {
+                    processFrameWithOcr(bitmap)
+                }
+            } else {
+                Log.w(TAG, "OCR capture returned null (attempt $attemptNum/$maxAttempts)")
+                // 重置标志以允许重试
+                isOcrProcessing.value = false
+                
+                if (attemptNum < maxAttempts) {
+                    lifecycleOwner.lifecycleScope.launch {
+                        delay(delayBetweenRetries)
+                        retryRequestOcrOnce(maxAttempts, delayBetweenRetries, attemptNum + 1)
+                    }
+                } else {
+                    Log.e(TAG, "OCR failed after $maxAttempts attempts")
+                    onOcrError?.invoke("OCR 失败：无法捕获页面")
+                }
+            }
         }
     }
 

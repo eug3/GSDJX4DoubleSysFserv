@@ -22,9 +22,16 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- 前台服务权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- 前台服务权限 (API 31+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" tools:targetApi="s" />
+    
+    <!-- 通知权限 (API 33+，Android 13+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    
+    <!-- 悬浮窗权限 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
 
@@ -40,7 +47,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.GSDJX4DoubleSysFserv"
-        android:extractNativeLibs="true">
+        android:extractNativeLibs="false">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -66,6 +73,11 @@
             android:name=".GeckoForegroundService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+        
+        <!-- 悬浮窗服务：后台维持 GeckoView attached to window -->
+        <service
+            android:name=".GeckoFloatingWindowService"
+            android:exported="false" />
     </application>
 
 </manifest>
