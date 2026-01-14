@@ -1,11 +1,8 @@
 package com.guaishoudejia.x4doublesysfserv
 
-import android.Manifest
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.util.Log
@@ -37,19 +34,22 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.lifecycleScope
-import com.guaishoudejia.x4doublesysfserv.ble.DomLayoutRenderer
 import com.guaishoudejia.x4doublesysfserv.ui.components.BleDeviceScanSheet
 import com.guaishoudejia.x4doublesysfserv.ui.components.BleFloatingButton
-import kotlinx.coroutines.*
+import com.guaishoudejia.x4doublesysfserv.ble.DomLayoutRenderer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.mozilla.geckoview.GeckoRuntime
-import org.mozilla.geckoview.GeckoRuntimeSettings
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
+import org.mozilla.geckoview.WebRequest
+import org.mozilla.geckoview.WebRequestError
 import java.util.Locale
 
 class GeckoActivity : ComponentActivity() {
     private var geckoView: GeckoView? = null
-    private var geckoSession: GeckoSession = GeckoSession()
+    private var geckoSession: GeckoSession? = null
     private var geckoRuntime: GeckoRuntime? = null
     
     private var wakeLock: PowerManager.WakeLock? = null
@@ -72,11 +72,12 @@ class GeckoActivity : ComponentActivity() {
     private var lastStatus by mutableStateOf("就绪")
     private var logicalPageIndex by mutableIntStateOf(0)
     private val renderHistory = mutableStateListOf<Bitmap>()
+    private var targetUrl: String = DEFAULT_URL  // 默认URL
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val targetUrl = intent.getStringExtra(EXTRA_URL).orEmpty().ifBlank { DEFAULT_URL }
+        targetUrl = intent.getStringExtra(EXTRA_URL).orEmpty().ifBlank { DEFAULT_URL }
         currentUrl = targetUrl
 
         // 初始化 GeckoRuntime
@@ -98,21 +99,32 @@ class GeckoActivity : ComponentActivity() {
                     factory = { context ->
                         GeckoView(context).apply {
                             geckoView = this
-                            setSession(geckoSession)
-                            
-                            // 初始加载
-                            geckoSession.loadUri(targetUrl)
-                            
-                            // 状态监听
-                            geckoSession.progressDelegate = object : GeckoSession.ProgressDelegate {
-                                override fun onPageStart(session: GeckoSession, url: String) {
-                                    currentUrl = url
-                                    isLoading = true
+                            // 使用已初始化的geckoSession
+                            geckoSession?.let { session ->
+                                setSession(session)
+                                
+                                // 🔑 设置网络请求拦截器，拦截所有流量走代理
+                                setupRequestInterceptor(session)
+                                
+                                // 转换URL为代理URL，使浏览器走RemoteServe代理
+                                val proxyUrl = convertToProxyUrl(targetUrl)
+                                Log.d("GeckoActivity", "原始URL: $targetUrl")
+                                Log.d("GeckoActivity", "代理URL: $proxyUrl")
+                                session.loadUri(proxyUrl)
+                                
+                                // 状态监听
+                                session.progressDelegate = object : GeckoSession.ProgressDelegate {
+                                    override fun onPageStart(session: GeckoSession, url: String) {
+                                        currentUrl = url
+                                        isLoading = true
+                                        Log.d("GeckoActivity", "页面开始加载: $url")
+                                    }
+                                    override fun onPageStop(session: GeckoSession, success: Boolean) {
+                                        isLoading = false
+                                        Log.d("GeckoActivity", "页面加载完成: $success")
+                                    }
                                 }
-                                override fun onPageStop(session: GeckoSession, success: Boolean) {
-                                    isLoading = false
-                                }
-                            }
+                            } ?: Log.e("GeckoActivity", "GeckoSession 未初始化")
                         }
                     }
                 )
@@ -149,7 +161,7 @@ class GeckoActivity : ComponentActivity() {
                         isVisible = bleConnectionManager.showScanSheet,
                         isScanning = bleConnectionManager.isScanning,
                         deviceList = bleConnectionManager.scannedDevices,
-                        onDeviceSelected = { address, name ->
+                        onDeviceSelected = { address: String, name: String ->
                             bleConnectionManager.connectToDevice(address, name) { _ -> }
                             bleConnectionManager.showScanSheet = false
                         },
@@ -168,12 +180,18 @@ class GeckoActivity : ComponentActivity() {
     }
 
     private fun setupGeckoRuntime() {
-        // GeckoRuntimeSettings.Builder 并不直接提供 domStorageEnabled，GeckoView 默认开启
-        val settings = GeckoRuntimeSettings.Builder()
-            .javaScriptEnabled(true)
-            .build()
+        // 使用 GeckoRuntimeManager 获取共享的 GeckoRuntime 实例
+        // 避免创建多个 GeckoRuntime 实例导致 "Only one GeckoRuntime instance is allowed" 错误
+        val runtime = GeckoRuntimeManager.getRuntime(this)
+        geckoRuntime = runtime
         
-        geckoRuntime = GeckoRuntime.create(this, settings)
+        // 修复参数类型不匹配问题：GeckoSession 构造函数接收 GeckoSessionSettings
+        // 应该先创建 Session，然后调用 open(runtime) 关联
+        val session = GeckoSession()
+        session.open(runtime)
+        geckoSession = session
+        
+        Log.d("GeckoActivity", "GeckoSession 初始化完成并已开启")
     }
 
     private fun exitEbookMode() {
@@ -267,8 +285,8 @@ class GeckoActivity : ComponentActivity() {
                 }
 
                 // GeckoView 截图 (捕获当前页面内容)
-                // 注意：在最新版本的 GeckoView 中，使用 screenshot() 代替 captureThumbnail()
-                geckoSession.screenshot().accept { bitmap: Bitmap? ->
+                // 注意：使用 capturePixels() 捕获当前渲染的页面内容
+                geckoView?.capturePixels()?.accept { bitmap: Bitmap? ->
                     if (bitmap != null) {
                         lifecycleScope.launch(Dispatchers.Main) {
                             renderHistory.add(bitmap)
@@ -304,52 +322,164 @@ class GeckoActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         releaseWakeLock()
-        geckoSession.close()
+        geckoSession?.close()
+        bleConnectionManager.disconnect()
     }
 
     private fun acquireWakeLock() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "x4:remote").apply { try { acquire(30 * 60 * 1000L) } catch(_:Exception){} }
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GeckoActivity::WakeLock")
+        wakeLock?.acquire(10 * 60 * 1000L /*10 minutes*/)
     }
 
     private fun releaseWakeLock() {
-        if (wakeLock?.isHeld == true) wakeLock?.release()
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+        }
         wakeLock = null
     }
 
-    private fun requestBleAndStartScan() {
-        if (bleConnectionManager.hasRequiredPermissions()) {
-            startScanAndShow()
-        } else {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                pendingStartScan = true
-                blePermissionLauncher.launch(arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT))
-            } else {
-                startScanAndShow()
+    private fun checkRemoteServe() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val client = okhttp3.OkHttpClient()
+                val request = okhttp3.Request.Builder().url("http://172.16.8.248:8080/ping").build()
+                val response = client.newCall(request).execute()
+                remoteServeAvailable = response.isSuccessful
+            } catch (e: Exception) {
+                remoteServeAvailable = false
             }
         }
     }
 
-    private fun startScanAndShow() {
-        bleConnectionManager.showScanSheet = true
-        if (!bleConnectionManager.isScanning) bleConnectionManager.startScanning()
+    private fun requestBleAndStartScan() {
+        pendingStartScan = true
+        blePermissionLauncher.launch(
+            arrayOf(
+                android.Manifest.permission.BLUETOOTH_SCAN,
+                android.Manifest.permission.BLUETOOTH_CONNECT,
+                android.Manifest.permission.ACCESS_FINE_LOCATION
+            )
+        )
     }
 
-    private fun checkRemoteServe() {
-        lifecycleScope.launch {
-            remoteServeAvailable = WeReadProxyClient.isAvailable()
+    private fun startScanAndShow() {
+        bleConnectionManager.startScanning()
+        bleConnectionManager.showScanSheet = true
+    }
+
+    /**
+     * 设置 GeckoView 网络请求拦截器
+     * 拦截所有 HTTP/HTTPS 请求并转发到代理服务器
+     */
+    private fun setupRequestInterceptor(session: GeckoSession) {
+        session.webRequestDelegate = object : GeckoSession.WebRequestDelegate {
+            override fun onLoadRequest(
+                session: GeckoSession,
+                request: WebRequest
+            ): GeckoSession.WebRequestDelegate.LoadRequestReturn? {
+                val originalUri = request.uri
+                
+                // 跳过某些协议和特殊请求
+                if (shouldSkipProxyForUri(originalUri)) {
+                    Log.d("GeckoActivity", "跳过代理: $originalUri")
+                    return null  // 使用默认处理
+                }
+                
+                // 转换为代理 URL
+                val proxyUri = convertToProxyUrl(originalUri)
+                
+                Log.d("GeckoActivity", "📡 拦截请求")
+                Log.d("GeckoActivity", "  原始: $originalUri")
+                Log.d("GeckoActivity", "  代理: $proxyUri")
+                
+                // 创建新的代理请求
+                val proxyRequest = WebRequest.Builder(proxyUri)
+                    .method(request.method)
+                    .apply {
+                        // 复制原始请求头
+                        request.headers?.forEach { (key, value) ->
+                            addHeader(key, value)
+                        }
+                    }
+                    .cacheMode(request.cacheMode)
+                    .build()
+                
+                return GeckoSession.WebRequestDelegate.LoadRequestReturn(proxyRequest)
+            }
+        }
+    }
+
+    /**
+     * 判断是否应该跳过代理处理
+     */
+    private fun shouldSkipProxyForUri(uri: String): Boolean {
+        return uri.startsWith("data:") ||
+               uri.startsWith("about:") ||
+               uri.startsWith("blob:") ||
+               uri.startsWith("moz-extension:") ||
+               uri.startsWith("file://") ||
+               uri.startsWith("chrome://") ||
+               uri == null ||
+               uri.isEmpty()
+    }
+
+    /**
+     * 将原始URL转换为代理URL
+     * 支持完整URL和相对路径
+     * 
+     * 示例转换：
+     * https://weread.qq.com/web/reader/123
+     *   ↓
+     * http://172.16.8.248:8080/proxy/https/weread.qq.com/web/reader/123
+     * 
+     * /web/reader/456 (相对路径时使用上一个主机)
+     *   ↓
+     * http://172.16.8.248:8080/proxy/https/weread.qq.com/web/reader/456
+     */
+    private fun convertToProxyUrl(originalUrl: String): String {
+        return try {
+            // 尝试解析为完整 URL
+            val url = java.net.URL(originalUrl)
+            val scheme = url.protocol          // https
+            val host = url.host                // weread.qq.com
+            val path = url.path                // /web/reader/123
+            val query = url.query              // param=value
+            val fullPath = path + (query?.let { "?$it" } ?: "")
+            
+            "http://172.16.8.248:8080/proxy/$scheme/$host$fullPath"
+        } catch (e: Exception) {
+            // 如果不是完整URL，可能是相对路径
+            // 使用默认主机构建代理URL
+            Log.d("GeckoActivity", "URL 转换（作为相对路径）: $originalUrl")
+            
+            try {
+                val defaultScheme = "https"
+                val defaultHost = "weread.qq.com"
+                val path = if (originalUrl.startsWith("/")) {
+                    originalUrl
+                } else {
+                    "/$originalUrl"
+                }
+                
+                "http://172.16.8.248:8080/proxy/$defaultScheme/$defaultHost$path"
+            } catch (e2: Exception) {
+                Log.e("GeckoActivity", "URL转换失败: ${e2.message}", e2)
+                originalUrl  // 转换失败时返回原始URL
+            }
         }
     }
 
     companion object {
-        private const val DEFAULT_URL = "https://weread.qq.com/"
-        private const val EXTRA_URL = "extra_url"
-        private const val EXTRA_DEVICE_ADDRESS = "extra_device_address"
-        fun launch(context: Context, url: String, address: String?) {
-            context.startActivity(Intent(context, GeckoActivity::class.java).apply {
+        const val EXTRA_URL = "extra_url"
+        const val DEFAULT_URL = "https://weread.qq.com/"
+        
+        fun launch(context: Context, url: String, extraParams: String? = null) {
+            val intent = Intent(context, GeckoActivity::class.java).apply {
                 putExtra(EXTRA_URL, url)
-                putExtra(EXTRA_DEVICE_ADDRESS, address)
-            })
+                // 这里可以根据需要处理 extraParams
+            }
+            context.startActivity(intent)
         }
     }
 }

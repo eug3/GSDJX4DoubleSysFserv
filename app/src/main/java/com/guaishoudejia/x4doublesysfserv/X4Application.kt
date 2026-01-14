@@ -30,9 +30,6 @@ class X4Application : Application() {
         }
 
         Log.d(TAG, "主进程启动，开始初始化...")
-
-        // 预初始化共享的 GeckoRuntime
-        initializeGeckoRuntime()
     }
 
     private fun getCurrentProcessName(): String {
@@ -50,16 +47,6 @@ class X4Application : Application() {
             }
         }
         return "unknown"
-    }
-    
-    private fun initializeGeckoRuntime() {
-        try {
-            Log.d(TAG, "预初始化 GeckoRuntime...")
-            GeckoRuntimeManager.getRuntime(this)
-            Log.d(TAG, "GeckoRuntime 预初始化完成")
-        } catch (e: Exception) {
-            Log.e(TAG, "GeckoRuntime 预初始化失败", e)
-        }
     }
 
     companion object {

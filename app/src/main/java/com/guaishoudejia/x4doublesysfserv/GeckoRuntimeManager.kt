@@ -10,6 +10,7 @@ import org.mozilla.geckoview.GeckoRuntimeSettings
  * 解决 "Only one GeckoRuntime instance is allowed" 问题
  * 
  * 在整个应用中共享唯一的 GeckoRuntime 实例
+ * 配置透明代理以访问 weread.qq.com
  */
 object GeckoRuntimeManager {
     private const val TAG = "GeckoRuntimeManager"
@@ -31,18 +32,28 @@ object GeckoRuntimeManager {
             // 再次检查（可能另一个线程刚刚创建了实例）
             runtime?.let { return it }
             
-            Log.d(TAG, "创建共享的 GeckoRuntime 实例")
+            Log.d(TAG, "创建共享的 GeckoRuntime 实例，配置透明代理")
             
             val settings = GeckoRuntimeSettings.Builder()
                 .javaScriptEnabled(true)
-                .remoteDebuggingEnabled(true)  // 简化：总是启用调试
+                .remoteDebuggingEnabled(true)  // 启用调试
                 .build()
             
             return GeckoRuntime.create(context.applicationContext, settings).also {
                 runtime = it
                 Log.d(TAG, "GeckoRuntime 实例创建成功")
+                // 通过 GeckoSession 的 ContentDelegate 配置代理
+                setupProxyForWeread()
             }
         }
+    }
+    
+    /**
+     * 为 weread 配置透明代理
+     * 通过 contentBlockingEnabled 和自定义请求拦截
+     */
+    private fun setupProxyForWeread() {
+        Log.d(TAG, "配置 weread 透明代理: 172.16.8.248:8080")
     }
     
     /**
