@@ -68,16 +68,20 @@
             android:label="阅读器"
             android:theme="@style/Theme.GSDJX4DoubleSysFserv" />
         
-        <!-- 前台服务：独立 GeckoRuntime + VirtualSurface 离屏渲染 -->
+        <!-- 命令服务：处理蓝牙命令和 HTTP 请求 -->
         <service
-            android:name=".GeckoForegroundService"
+            android:name=".CommandService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
-        
-        <!-- 悬浮窗服务：后台维持 GeckoView attached to window -->
-        <service
-            android:name=".GeckoFloatingWindowService"
-            android:exported="false" />
+
+        <!-- BLE 命令接收器 -->
+        <receiver
+            android:name=".BleCommandReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.guaishoudejia.x4doublesysfserv.BLE_COMMAND" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>
