@@ -27,8 +27,6 @@ import androidx.compose.ui.window.PopupProperties
  * @param deviceName 设备名称
  * @param onScan 点击扫描回调
  * @param onForget 点击忘记回调
- * @param onStartOcr 点击启动 OCR 回调
- * @param isOcrProcessing OCR 是否正在处理中
  */
 @Composable
 fun BleFloatingButton(
@@ -41,7 +39,6 @@ fun BleFloatingButton(
     onTogglePanel: () -> Unit = {},
     onRefresh: () -> Unit = {},
     onExit: () -> Unit = {},
-    onStartOcr: () -> Unit = {},
     isOcrProcessing: Boolean = false
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -142,23 +139,13 @@ fun BleFloatingButton(
                             )
                         }
 
-                        // 展开/收起 预览与 OCR
+                        // 展开/收起 预览
                         MenuItemButton(
                             icon = "🗂️",
-                            label = if (isPanelExpanded) "收起预览" else "展开预览与OCR",
+                            label = if (isPanelExpanded) "收起预览" else "展开预览",
                             onClick = {
                                 expanded = false
                                 onTogglePanel()
-                            }
-                        )
-
-                        // 启动 OCR
-                        MenuItemButton(
-                            icon = "📄",
-                            label = if (isOcrProcessing) "处理中..." else "启动 OCR",
-                            onClick = {
-                                expanded = false
-                                onStartOcr()
                             }
                         )
 

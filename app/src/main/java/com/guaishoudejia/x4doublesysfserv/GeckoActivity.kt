@@ -4,30 +4,22 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.util.Log
 import android.view.KeyEvent
-import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -50,11 +42,12 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSession.NavigationDelegate
 import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
+import org.mozilla.geckoview.WebResourceError
+import org.mozilla.geckoview.WarnedResponse
 import com.guaishoudejia.x4doublesysfserv.ble.DomLayoutRenderer
-import com.guaishoudejia.x4doublesysfserv.ocr.OcrHelper
-import com.guaishoudejia.x4doublesysfserv.ocr.OcrResult
 import com.guaishoudejia.x4doublesysfserv.ui.components.BleDeviceScanSheet
 import com.guaishoudejia.x4doublesysfserv.ui.components.BleFloatingButton
 import kotlin.coroutines.resume
@@ -63,12 +56,10 @@ class GeckoActivity : ComponentActivity() {
     private var runtime: GeckoRuntime? = null
     private var session: GeckoSession? = null
     private var geckoView: GeckoView? = null
-    private var isSessionSharedWithService = false  // 标记 Session 是否已共享给 Service
     private var wakeLock: PowerManager.WakeLock? = null
-    private var bleEspClient: BleEspClient? = null
     private lateinit var bleConnectionManager: BleConnectionManager
     private var pendingStartScan = false
-    private var geckoOcrManager: GeckoOcrIntegrationManager? = null
+    private var remoteServeAvailable by mutableStateOf(false)
     private val blePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -76,27 +67,14 @@ class GeckoActivity : ComponentActivity() {
         if (granted && pendingStartScan) startScanAndShow()
         pendingStartScan = false
     }
-    
-    // ================= 核心状态变量 =================
+
+    // 核心状态变量
     private var currentUrl by mutableStateOf("")
     private var isEbookMode by mutableStateOf(false)
     private var isLoading by mutableStateOf(false)
     private var lastStatus by mutableStateOf("就绪")
     private var logicalPageIndex by mutableIntStateOf(0)
     private val renderHistory = mutableStateListOf<Bitmap>()
-
-    // OCR 状态
-    private var isRecognizing by mutableStateOf(false)
-    private var ocrResult by mutableStateOf<OcrResult?>(null)
-    private var ocrError by mutableStateOf<String?>(null)
-    
-    // Gecko 前台服务 + OCR 状态
-    private var showOcrTextScreen by mutableStateOf(false)
-    private var geckoServiceRunning by mutableStateOf(false)
-    private var geckoOcrProcessing by mutableStateOf(false)
-    private var geckoCurrentPage by mutableIntStateOf(0)
-    private var geckoTotalPages by mutableIntStateOf(0)
-    private val geckoOcrBlocks = mutableStateListOf<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -110,48 +88,104 @@ class GeckoActivity : ComponentActivity() {
             handleBleCommand(cmd)
         }
 
-        // OCR 已在 X4Application 启动时初始化，此处无需再次初始化
-        Log.d("GeckoActivity", "OCR 初始化已在应用启动时完成")
-        
-        // 初始化 Gecko 前台服务 + OCR 管理器
-        val ocrHelper = OcrHelper
-        geckoOcrManager = GeckoOcrIntegrationManager(this, this, ocrHelper)
-        geckoOcrManager?.initialize()
-        geckoOcrManager?.onOcrComplete = { blocks ->
-            geckoOcrBlocks.clear()
-            geckoOcrBlocks.addAll(blocks)
-            geckoCurrentPage = geckoOcrManager!!.currentPageIndex.value
-            geckoTotalPages = geckoOcrManager!!.getTotalPages()
-            geckoOcrProcessing = false
-            ocrError = null
-        }
-        geckoOcrManager?.onOcrError = { error ->
-            ocrError = error
-            geckoOcrProcessing = false
-        }
-        geckoOcrManager?.onServiceStateChanged = { isRunning ->
-            geckoServiceRunning = isRunning
-        }
-        geckoOcrManager?.onDispatchKey = { keyCode ->
-            // 发送按键事件到 GeckoView
-            dispatchArrow(keyCode)
-        }
-        Log.d("GeckoActivity", "Gecko OCR 集成管理器已初始化")
-
         // 使用共享的 GeckoRuntime 实例
         runtime = GeckoRuntimeManager.getRuntime(this)
         val settings = GeckoSessionSettings.Builder()
             .usePrivateMode(false)
-            .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP) // 统一为桌面模式
+            .userAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP)
             .build()
 
         session = GeckoSession(settings).apply {
             open(runtime!!)
+
+            // 设置导航拦截器 - 将 weread.qq.com 请求重定向到本地代理
+            navigationDelegate = object : NavigationDelegate {
+                override fun onLoadRequest(
+                    session: GeckoSession,
+                    request: GeckoSession.NavigationDelegate.LoadRequest
+                ): GeckoSession.NavigationDelegate.OnLoadRequestCallback {
+                    val url = request.url
+
+                    // 拦截 weread.qq.com 的请求
+                    if (url.contains("weread.qq.com") && !url.startsWith("http://localhost:8080") && !url.startsWith("x4bmp://")) {
+                        // 提取路径部分
+                        val path = url.removePrefix("https://weread.qq.com").removePrefix("http://weread.qq.com")
+                        val proxyUrl = "http://localhost:8080/weread$path"
+                        Log.d("GeckoActivity", "代理请求: $url -> $proxyUrl")
+                        return GeckoSession.NavigationDelegate.OnLoadRequestCallback(proxyUrl)
+                    }
+
+                    // 放行其他请求（包括本地代理响应、x4bmp 协议等）
+                    return GeckoSession.NavigationDelegate.OnLoadRequestCallback(request.url)
+                }
+
+                override fun onSafeBrowsingHelpRequest(
+                    session: GeckoSession,
+                    url: String,
+                    threatTypes: Array<out String>,
+                    violatedSafeBrowsingCategories: Array<out String>,
+                    helpUri: String
+                ) {
+                    // 忽略安全警告
+                }
+
+                override fun onContentPermissionRequest(
+                    session: GeckoSession,
+                    request: GeckoSession.NavigationDelegate.ContentPermissionRequest
+                ): GeckoSession.NavigationDelegate.OnContentPermissionRequestCallback {
+                    // 允许所有权限请求
+                    return GeckoSession.NavigationDelegate.OnContentPermissionRequestCallback(
+                        GeckoSession.PermissionDecision.ALLOW,
+                        null
+                    )
+                }
+
+                override fun onCookiePermissionRequest(
+                    session: GeckoSession,
+                    request: GeckoSession.NavigationDelegate.CookiePermissionRequest
+                ): GeckoSession.NavigationDelegate.OnCookiePermissionRequestCallback {
+                    // 允许所有 Cookie
+                    return GeckoSession.NavigationDelegate.OnCookiePermissionRequestCallback(
+                        GeckoSession.PermissionDecision.ALLOW
+                    )
+                }
+
+                override fun onTrackingProtectionUriRequest(
+                    session: GeckoSession,
+                    url: String
+                ): GeckoSession.NavigationDelegate.OnTrackingProtectionUriRequestCallback {
+                    return GeckoSession.NavigationDelegate.OnTrackingProtectionUriRequestCallback(null)
+                }
+
+                override fun onRequest(
+                    session: GeckoSession,
+                    request: GeckoSession.NavigationDelegate.Request
+                ): GeckoSession.NavigationDelegate.OnRequestCallback {
+                    return GeckoSession.NavigationDelegate.OnRequestCallback(GeckoSession.PermissionDecision.ALLOW)
+                }
+
+                override fun onSubframeLoadRequest(
+                    session: GeckoSession,
+                    request: GeckoSession.NavigationDelegate.LoadRequest
+                ): GeckoSession.NavigationDelegate.OnLoadRequestCallback {
+                    return GeckoSession.NavigationDelegate.OnLoadRequestCallback(request.url)
+                }
+
+                override fun onLoadError(
+                    session: GeckoSession,
+                    uri: String,
+                    error: WebResourceError
+                ): GeckoSession.NavigationDelegate.OnLoadErrorCallback? {
+                    return null
+                }
+            }
         }
+
+        // 检查 RemoteServe 是否可用
+        checkRemoteServe()
 
         setContent {
             var fullScreenBitmap by remember { mutableStateOf<Bitmap?>(null) }
-            val scope = rememberCoroutineScope()
             var isPanelExpanded by remember { mutableStateOf(false) }
 
             val density = androidx.compose.ui.platform.LocalDensity.current
@@ -165,8 +199,8 @@ class GeckoActivity : ComponentActivity() {
             // 监听有效 URL 变化
             DisposableEffect(session) {
                 val delegate = object : GeckoSession.ProgressDelegate {
-                    override fun onPageStart(session: GeckoSession, url: String) { 
-                        if (!url.startsWith("x4bmp://")) currentUrl = url 
+                    override fun onPageStart(session: GeckoSession, url: String) {
+                        if (!url.startsWith("x4bmp://")) currentUrl = url
                     }
                     override fun onPageStop(session: GeckoSession, success: Boolean) {}
                     override fun onProgressChange(session: GeckoSession, progress: Int) {}
@@ -187,7 +221,7 @@ class GeckoActivity : ComponentActivity() {
                     }
                 )
 
-                // 自动检测阅读页并启用 Ebook 模式（不自动触发同步或扫描）
+                // 自动检测阅读页并启用 Ebook 模式
                 LaunchedEffect(currentUrl) {
                     if (currentUrl.contains("weread.qq.com/web/reader/") && !isEbookMode) {
                         isEbookMode = true
@@ -210,12 +244,7 @@ class GeckoActivity : ComponentActivity() {
                             releaseWakeLock()
                             renderHistory.clear()
                             bleConnectionManager.disconnect()
-                        },
-                        onStartOcr = {
-                            Log.d("GeckoActivity", "从菜单启动 OCR")
-                            launchOcrWithCookieSync(currentUrl)
-                        },
-                        isOcrProcessing = geckoOcrProcessing
+                        }
                     )
 
                     // 底部：Ebook 控制面板
@@ -224,7 +253,7 @@ class GeckoActivity : ComponentActivity() {
                         onToggleExpand = { isPanelExpanded = !isPanelExpanded },
                         onRefresh = { performSync(logicalPageIndex) },
                         onPageClick = { fullScreenBitmap = it },
-                        onExit = { 
+                        onExit = {
                             isEbookMode = false
                             releaseWakeLock()
                             renderHistory.clear()
@@ -243,73 +272,15 @@ class GeckoActivity : ComponentActivity() {
                             }
                             bleConnectionManager.showScanSheet = false
                         },
-                        onDismiss = { 
+                        onDismiss = {
                             bleConnectionManager.stopScanning()
-                            bleConnectionManager.showScanSheet = false 
+                            bleConnectionManager.showScanSheet = false
                         }
                     )
                 }
 
                 fullScreenBitmap?.let { bmp ->
                     ZoomableImageOverlay(bitmap = bmp, onClose = { fullScreenBitmap = null })
-                }
-
-                // Gecko 前台服务 + OCR 文本显示屏
-                if (showOcrTextScreen) {
-                    Box(modifier = Modifier.fillMaxSize().background(Color.White)) {
-                        OcrTextDisplayScreen(
-                            currentPageIndex = geckoCurrentPage,
-                            totalPages = geckoTotalPages,
-                            blocks = geckoOcrBlocks,
-                            isLoading = geckoOcrProcessing,
-                            onPreviousPage = {
-                                geckoOcrManager?.previousPage()
-                                // 状态更新会在 onOcrComplete 回调中处理
-                            },
-                            onNextPage = {
-                                geckoOcrManager?.nextPage()
-                                // 状态更新会在 onOcrComplete 回调中处理
-                            },
-                            onClose = {
-                                showOcrTextScreen = false
-                                geckoOcrManager?.stopService()
-
-                                // 停止服务后，恢复 Session 到 GeckoView
-                                isSessionSharedWithService = false
-                                geckoOcrProcessing = false
-
-                                // 延迟以等待 Service 释放 Display 资源，使用重试机制
-                                scope.launch {
-                                    delay(1500)  // 增加延迟到 1500ms
-                                    // 重试多次，直到成功恢复 Session
-                                    for (i in 1..3) {
-                                        if (session != null && geckoView != null) {
-                                            try {
-                                                Log.d("GeckoActivity", "尝试恢复 Session 到 GeckoView (第 $i 次)")
-                                                // 先释放可能存在的旧 Session 绑定
-                                                try {
-                                                    geckoView?.releaseSession()
-                                                } catch (e: Exception) {
-                                                    Log.w("GeckoActivity", "releaseSession error (ignored): ${e.message}")
-                                                }
-                                                // 重新绑定 Session
-                                                geckoView?.setSession(session!!)
-                                                Log.d("GeckoActivity", "Session 恢复成功")
-                                                break
-                                            } catch (e: Exception) {
-                                                Log.w("GeckoActivity", "Session 恢复失败 (第 $i 次): ${e.message}")
-                                                if (i < 3) {
-                                                    delay(500)  // 等待 500ms 后重试
-                                                } else {
-                                                    Log.e("GeckoActivity", "Session 恢复失败，已重试 3 次")
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        )
-                    }
                 }
             }
         }
@@ -328,7 +299,6 @@ class GeckoActivity : ComponentActivity() {
         val pagerState = rememberPagerState(pageCount = { renderHistory.size })
         LaunchedEffect(renderHistory.size) { if (renderHistory.isNotEmpty()) pagerState.animateScrollToPage(renderHistory.size - 1) }
 
-        // 图片预览和 OCR 结果并排显示
         if (isExpanded) {
             Row(
                 modifier = Modifier
@@ -338,97 +308,33 @@ class GeckoActivity : ComponentActivity() {
                     .background(Color(0xFFF5F5F5).copy(alpha = 0.95f))
                     .padding(8.dp)
             ) {
-            // 左侧：图片预览
-            if (renderHistory.isNotEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(200.dp)
-                        .padding(end = 8.dp)
-                ) {
-                    HorizontalPager(
-                        state = pagerState,
-                        contentPadding = PaddingValues(horizontal = 32.dp),
-                        pageSpacing = 8.dp,
-                        modifier = Modifier.fillMaxSize()
-                    ) { page ->
-                        Image(
-                            bitmap = renderHistory[page].asImageBitmap(),
-                            contentDescription = null,
-                            modifier = Modifier
-                                .fillMaxHeight()
-                                .aspectRatio(480f / 800f)
-                                .background(Color.White)
-                                .clickable { onPageClick(renderHistory[page]) },
-                            contentScale = ContentScale.Fit
-                        )
-                    }
-                }
-            }
-
-            // 右侧：OCR 识别结果
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(200.dp)
-                    .background(Color.White)
-                    .padding(8.dp)
-            ) {
-                // 标题栏
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(text = "OCR 识别", fontSize = 11.sp, color = Color.Gray)
-                    if (isRecognizing) {
-                        CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // OCR 内容
-                when {
-                    isRecognizing -> {
-                        Text("正在识别...", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(vertical = 16.dp))
-                    }
-                    ocrError != null -> {
-                        Text("识别失败", fontSize = 12.sp, color = Color.Red)
-                    }
-                    ocrResult != null -> {
-                        // 统计信息
-                        Text(
-                            text = "${ocrResult!!.blocks.size} 段落",
-                            fontSize = 10.sp,
-                            color = Color.Gray
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        // 文字内容（可滚动）
-                        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                                ocrResult!!.blocks.forEachIndexed { index, block ->
-                                    Text(
-                                        text = block.text,
-                                        fontSize = 12.sp,
-                                        modifier = Modifier.padding(vertical = 2.dp)
-                                    )
-                                    if (index < ocrResult!!.blocks.size - 1) {
-                                        HorizontalDivider(
-                                            color = Color.LightGray.copy(alpha = 0.5f),
-                                            thickness = 0.5.dp,
-                                            modifier = Modifier.padding(vertical = 4.dp)
-                                        )
-                                    }
-                                }
-                            }
+                // 图片预览
+                if (renderHistory.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(200.dp)
+                            .padding(end = 8.dp)
+                    ) {
+                        HorizontalPager(
+                            state = pagerState,
+                            contentPadding = PaddingValues(horizontal = 32.dp),
+                            pageSpacing = 8.dp,
+                            modifier = Modifier.fillMaxSize()
+                        ) { page ->
+                            Image(
+                                bitmap = renderHistory[page].asImageBitmap(),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .aspectRatio(480f / 800f)
+                                    .background(Color.White)
+                                    .clickable { onPageClick(renderHistory[page]) },
+                                contentScale = ContentScale.Fit
+                            )
                         }
                     }
-                    else -> {
-                        Text("暂无识别结果", fontSize = 12.sp, color = Color.Gray)
-                    }
                 }
-            }
             }
         }
 
@@ -476,15 +382,12 @@ class GeckoActivity : ComponentActivity() {
         BackHandler { onClose() }
     }
 
-    // ================= 核心业务同步逻辑 =================
-
+    // 核心业务同步逻辑
     private fun performSync(pageNum: Int) {
         lifecycleScope.launch(Dispatchers.Main) {
             isLoading = true
-            ocrResult = null
-            ocrError = null
             try {
-                // 1. 处理翻页逻辑
+                // 处理翻页逻辑
                 val diff = pageNum - logicalPageIndex
                 if (diff != 0) {
                     val key = if (diff > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
@@ -492,7 +395,7 @@ class GeckoActivity : ComponentActivity() {
                     logicalPageIndex = pageNum
                 }
 
-                // 2. 注入 JS 直接截取 Canvas 像素数据 (应对 WeRead 的 Canvas 渲染)
+                // 注入 JS 直接截取 Canvas 像素数据
                 Log.d("SYNC", "开始抓取 Canvas 图片")
                 val bitmap = captureCanvasViaJs()
 
@@ -505,25 +408,13 @@ class GeckoActivity : ComponentActivity() {
 
                 Log.d("SYNC", "Canvas 抓取成功，尺寸: ${bitmap.width}x${bitmap.height}")
 
-                // 2.4. 统一二值化：预览(det) 与 OCR(det+rec) 共用同一张二值化 bitmap
-                val binarizedBitmap = withContext(Dispatchers.Default) {
-                    OcrHelper.binarizeBitmap(bitmap)
-                }
-                Log.d("SYNC", "图像二值化完成")
-                
-                // 2.5. 绘制检测框到图像上（用于预览调试）
-                val boxedBitmap = withContext(Dispatchers.Default) {
-                    OcrHelper.drawDetectionBoxes(binarizedBitmap)
-                }
-                Log.d("SYNC", "已在图像上绘制检测框")
-                
-                // 添加带框的原始图像到历史（用于预览）
-                renderHistory.add(boxedBitmap)
+                // 添加原始图像到历史
+                renderHistory.add(bitmap)
 
-                // 3. 渲染并发送到 BLE 设备（如果已连接）- 使用原始 bitmap
+                // 渲染并发送到 BLE 设备
                 val renderResult = DomLayoutRenderer.renderTo1bpp48k(bitmap)
                 Log.d("SYNC", "渲染完成: ${renderResult.debugStats}")
-                
+
                 val bleClient = bleConnectionManager.getBleClient()
                 if (bleClient != null && bleConnectionManager.isConnected) {
                     try {
@@ -534,35 +425,10 @@ class GeckoActivity : ComponentActivity() {
                             Log.w("SYNC", "BLE 连接未就绪，跳过发送")
                         }
                     } catch (e: Exception) {
-                        Log.w("SYNC", "发送 BLE 数据失败（不影响 OCR）", e)
+                        Log.w("SYNC", "发送 BLE 数据失败", e)
                     }
                 }
                 lastStatus = "同步成功: 第 $pageNum 页"
-
-                // 4. OCR 文字识别 (在后台线程执行，独立于 BLE) - 使用二值化后的图像
-                Log.d("SYNC", "开始 OCR 识别...")
-                isRecognizing = true
-
-                withContext(Dispatchers.Default) {
-                    try {
-                        // 使用二值化后的图像进行 OCR 识别
-                        val ocr = OcrHelper.recognizeText(binarizedBitmap)
-                        Log.d("SYNC", "OCR 识别完成: ${ocr.blocks.size} 段落")
-
-                        withContext(Dispatchers.Main) {
-                            ocrResult = ocr
-                            isRecognizing = false
-                            lastStatus = "同步完成 (OCR: ${ocr.blocks.size} 段落)"
-                        }
-                    } catch (e: Exception) {
-                        Log.e("SYNC", "OCR 识别异常", e)
-                        withContext(Dispatchers.Main) {
-                            ocrError = e.message
-                            isRecognizing = false
-                            lastStatus = "同步完成 (OCR 失败)"
-                        }
-                    }
-                }
             } catch (e: Exception) {
                 Log.e("SYNC", "同步异常", e)
                 lastStatus = "异常: ${e.message}"
@@ -583,39 +449,26 @@ class GeckoActivity : ComponentActivity() {
             Log.e("CAPTURE", "session 为 null")
             return@withContext null
         }
-        Log.d("CAPTURE", "开始抓取，prevProgress=${s.progressDelegate}")
 
         suspendCancellableCoroutine { cont ->
             val prevProgress = s.progressDelegate
-            Log.d("CAPTURE", "设置新的 progressDelegate")
 
             s.progressDelegate = object : GeckoSession.ProgressDelegate {
                 override fun onPageStart(session: GeckoSession, url: String) {
-                    Log.d("CAPTURE", "onPageStart: $url")
                     if (url.startsWith("x4bmp://")) {
                         try {
                             val data = url.removePrefix("x4bmp://")
-                            Log.d("CAPTURE", "data length: ${data.length}")
                             if (data == "ERROR") {
-                                Log.w("CAPTURE", "JS 返回 ERROR")
                                 if (!cont.isCompleted) cont.resume(null)
                             } else {
                                 val bytes = android.util.Base64.decode(data, android.util.Base64.DEFAULT)
-                                Log.d("CAPTURE", "Base64 解码成功，bytes size: ${bytes.size}")
                                 val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                if (bmp == null) {
-                                    Log.e("CAPTURE", "BitmapFactory.decodeByteArray 返回 null")
-                                } else {
-                                    Log.d("CAPTURE", "Bitmap 解码成功: ${bmp.width}x${bmp.height}")
-                                }
                                 if (!cont.isCompleted) cont.resume(bmp)
                             }
                         } catch (e: Exception) {
-                            Log.e("CAPTURE", "解析异常", e)
                             if (!cont.isCompleted) cont.resume(null)
                         } finally {
                             s.progressDelegate = prevProgress
-                            Log.d("CAPTURE", "恢复 prevProgress")
                         }
                     }
                 }
@@ -624,18 +477,16 @@ class GeckoActivity : ComponentActivity() {
                 override fun onSecurityChange(session: GeckoSession, info: GeckoSession.ProgressDelegate.SecurityInformation) {}
             }
 
-            // 核心脚本：轮询等待 Canvas 渲染，Canvas 需要足够时间完成绘制
-            // 微信读书使用 Canvas 而非 HTML 文本渲染，需要耐心等待
             val jsCode = """
                 (function() {
                     var maxAttempts = 75;
                     var interval = 200;
                     var attempts = 0;
-                    
+
                     function tryCapture() {
                         try {
                             var canvas = document.querySelector('canvas');
-                            if (!canvas) {
+                            if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
                                 attempts++;
                                 if (attempts < maxAttempts) {
                                     setTimeout(tryCapture, interval);
@@ -644,17 +495,7 @@ class GeckoActivity : ComponentActivity() {
                                 }
                                 return;
                             }
-                            
-                            if (canvas.width <= 0 || canvas.height <= 0) {
-                                attempts++;
-                                if (attempts < maxAttempts) {
-                                    setTimeout(tryCapture, interval);
-                                } else {
-                                    location.href = 'x4bmp://ERROR';
-                                }
-                                return;
-                            }
-                            
+
                             var data = canvas.toDataURL('image/png').split(',')[1];
                             if (!data || data.length < 100) {
                                 attempts++;
@@ -665,7 +506,7 @@ class GeckoActivity : ComponentActivity() {
                                 }
                                 return;
                             }
-                            
+
                             location.href = 'x4bmp://' + data;
                         } catch(e) {
                             attempts++;
@@ -676,109 +517,11 @@ class GeckoActivity : ComponentActivity() {
                             }
                         }
                     }
-                    
+
                     tryCapture();
                 })();
             """.trimIndent().replace("\n", "").replace("    ", " ")
-            Log.d("CAPTURE", "执行 JS")
             s.loadUri("javascript:$jsCode")
-        }
-    }
-
-    override fun onPause() {
-        super.onPause()
-
-        val isInteractive = isScreenInteractive()
-        // 只在“熄屏”场景下切换到后台虚拟 Surface 渲染；
-        // 如果只是切到后台但屏幕仍亮，不做自动切换，保持逻辑简单且可控。
-        if (!isInteractive && isEbookMode && !showOcrTextScreen) {
-            try {
-                Log.d("GeckoActivity", "检测到熄屏，切换到 Service 虚拟 Surface 渲染")
-
-                // 将当前 Activity 的 Session 传递给 Service
-                if (!isSessionSharedWithService) {
-                    session?.let { currentSession ->
-                        GeckoForegroundService.setSharedSession(currentSession)
-                        isSessionSharedWithService = true
-                        
-                        // 隐藏 GeckoView，让它在后台继续渲染
-                        try {
-                            if (geckoView != null) {
-                                geckoView?.visibility = android.view.View.GONE
-                                Log.d("GeckoActivity", "熄屏：GeckoView 已隐藏（保持 attached）")
-                            }
-                        } catch (e: Exception) {
-                            Log.w("GeckoActivity", "Hide geckoview error: ${e.message}")
-                        }
-                        
-                        Log.d("GeckoActivity", "熄屏：已将 Session 共享给 Service")
-                    }
-                }
-
-                // 启动后台渲染 + OCR（不弹出 OCR 文本页，等亮屏后需要再展示）
-                if (!geckoServiceRunning) {
-                    // 只启动离屏渲染，不自动 OCR（OCR 由 BLE 外设按需触发）
-                    geckoOcrProcessing = false
-
-                    // 使用真实屏幕尺寸（与 GeckoView 保持一致）
-                    val realWidth = resources.displayMetrics.widthPixels
-                    val realHeight = resources.displayMetrics.heightPixels
-
-                    geckoOcrManager?.startGeckoRendering(
-                        uri = currentUrl.ifBlank { DEFAULT_URL },
-                        width = realWidth,
-                        height = realHeight
-                    )
-                }
-            } catch (e: Exception) {
-                Log.e("GeckoActivity", "熄屏自动切换失败: ${e.message}", e)
-            }
-        }
-        
-        // 注意：如果 Session 已共享给 Service，不要 deactivate
-        // Service 会保持 Session active 以便熄屏后继续渲染
-        if (isSessionSharedWithService) {
-            Log.d("GeckoActivity", "Activity onPause - Session 由 Service 管理，保持 active")
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-
-        // 亮屏/回到前台时：如果之前因熄屏把 Session 交给了 Service，则恢复到真实 Surface
-        // 但如果用户正处于 OCR 文本页（showOcrTextScreen=true），则保持 Service 模式不打断。
-        if (isSessionSharedWithService && !showOcrTextScreen) {
-            Log.d("GeckoActivity", "恢复到前台，停止 Service 并显示 GeckoView")
-            
-            // 停止后台服务
-            geckoOcrManager?.stopService()
-            geckoOcrProcessing = false
-            
-            // 显示 GeckoView
-            try {
-                if (geckoView != null) {
-                    geckoView?.visibility = android.view.View.VISIBLE
-                    Log.d("GeckoActivity", "GeckoView 已显示")
-                }
-            } catch (e: Exception) {
-                Log.w("GeckoActivity", "Show geckoview error: ${e.message}")
-            }
-            
-            isSessionSharedWithService = false
-            Log.d("GeckoActivity", "Session 恢复到前台 GeckoView")
-
-            // 清除 Service 对共享 Session 的静态引用，避免持有 Activity 生命周期外对象
-            GeckoForegroundService.setSharedSession(null)
-        }
-    }
-
-    private fun isScreenInteractive(): Boolean {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
-            pm.isInteractive
-        } else {
-            @Suppress("DEPRECATION")
-            pm.isScreenOn
         }
     }
 
@@ -786,37 +529,18 @@ class GeckoActivity : ComponentActivity() {
         val cmd = rawCmd.trim()
         if (cmd.isBlank()) return
 
-        // 约定：外设发送 "OCR" 或 "OCR:ONCE" 触发熄屏页 OCR
-        // 兼容："SYNC" 触发原来的亮屏同步逻辑
         when {
-            cmd.equals("OCR", ignoreCase = true) || cmd.equals("OCR:ONCE", ignoreCase = true) -> {
-                Log.d("GeckoActivity", "BLE 触发 OCR: $cmd")
-                // 熄屏（或 Session 已交给 Service）时，走 Service 单帧抓取+OCR
-                val isInteractive = isScreenInteractive()
-                if (!isInteractive || isSessionSharedWithService) {
-                    geckoOcrProcessing = true
-                    geckoOcrManager?.requestOcrOnce()
-                } else {
-                    // 亮屏时如果你仍想用原来的 Canvas 抓取+OCR，可复用 performSync
-                    // 这里保持简单：直接走 performSync（会抓 Canvas 并 OCR）
-                    performSync(logicalPageIndex)
-                }
-            }
-
             cmd.equals("SYNC", ignoreCase = true) -> {
                 Log.d("GeckoActivity", "BLE 触发 SYNC")
                 performSync(logicalPageIndex)
             }
-
             cmd.startsWith("PAGE:", ignoreCase = true) -> {
-                // 如果外设上报页码，可在这里更新 logicalPageIndex 或触发同步
                 val pageNum = cmd.substringAfter(':', "").toIntOrNull()
                 if (pageNum != null) {
                     Log.d("GeckoActivity", "BLE 上报页码: $pageNum")
                     logicalPageIndex = pageNum
                 }
             }
-
             else -> {
                 Log.d("GeckoActivity", "未处理的 BLE 命令: $cmd")
             }
@@ -825,93 +549,8 @@ class GeckoActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        
-        // 清理共享状态
-        if (isSessionSharedWithService) {
-            GeckoForegroundService.setSharedSession(null)
-            isSessionSharedWithService = false
-            Log.d("GeckoActivity", "Activity onDestroy - 清除 Service 的 Session 引用")
-        }
-        
-        // 清理 Gecko OCR 管理器
-        geckoOcrManager?.cleanup()
-        geckoOcrManager = null
-    }
-
-    /**
-     * 启动 OCR 识别 - 统一使用虚拟屏幕模式
-     * 无论亮屏还是熄屏，都切换到 Service 虚拟屏幕进行 OCR
-     * 这样可以模拟熄屏场景，测试完整的虚拟屏幕流程
-     */
-    private fun launchOcrWithCookieSync(url: String) {
-        Log.d("GeckoActivity", "准备启动 OCR（虚拟屏幕模式）")
-        
-        // Android 13+ 需要通知权限
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != 
-                android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                Log.d("GeckoActivity", "请求通知权限")
-                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 100)
-            }
-        }
-        
-        launchOcrWithService(url)
-    }
-
-    /**
-     * 使用 Service 虚拟屏幕进行 OCR（熄屏场景）
-     */
-    private fun launchOcrWithService(url: String) {
-        Log.d("GeckoActivity", "准备启动 Service 虚拟屏幕 OCR")
-
-        lifecycleScope.launch {
-            try {
-                // 将当前 Activity 的 Session 传递给 Service
-                session?.let { currentSession ->
-                    GeckoForegroundService.setSharedSession(currentSession)
-                    isSessionSharedWithService = true
-                    
-                    // 不释放 Session，而是隐藏 GeckoView
-                    // GeckoView 保持 attached to window，但不显示
-                    // 这样 GeckoSession 在后台继续渲染，Canvas 可以被 Service 捕获
-                    try {
-                        if (geckoView != null) {
-                            geckoView?.visibility = android.view.View.GONE
-                            Log.d("GeckoActivity", "GeckoView 已隐藏（保持 attached 以维持渲染）")
-                        }
-                    } catch (e: Exception) {
-                        Log.w("GeckoActivity", "Hide geckoview error: ${e.message}")
-                    }
-                    
-                    Log.d("GeckoActivity", "已将 GeckoSession 共享给 Service")
-                }
-
-                // 标记 OCR 处理开始
-                geckoOcrProcessing = true
-
-                // 使用真实屏幕尺寸（与 GeckoView 保持一致）
-                val realWidth = resources.displayMetrics.widthPixels
-                val realHeight = resources.displayMetrics.heightPixels
-
-                // 启动 Gecko 前台服务 OCR
-                geckoOcrManager?.startGeckoRendering(
-                    uri = url.ifBlank { DEFAULT_URL },
-                    width = realWidth,
-                    height = realHeight
-                )
-
-                showOcrTextScreen = true
-                Log.d("GeckoActivity", "Service 虚拟屏幕 OCR 启动成功")
-
-            } catch (e: Exception) {
-                Log.e("GeckoActivity", "Service OCR 启动失败: ${e.message}", e)
-                geckoOcrProcessing = false
-                isSessionSharedWithService = false
-                // 出错尝试恢复
-                if (session != null && geckoView != null) {
-                    geckoView?.setSession(session!!)
-                }
-            }
+        if (isEbookMode) {
+            releaseWakeLock()
         }
     }
 
@@ -947,6 +586,60 @@ class GeckoActivity : ComponentActivity() {
         bleConnectionManager.showScanSheet = true
         if (!bleConnectionManager.isScanning) {
             bleConnectionManager.startScanning()
+        }
+    }
+
+    /**
+     * 检查 RemoteServe 是否可用
+     */
+    private fun checkRemoteServe() {
+        lifecycleScope.launch {
+            remoteServeAvailable = WeReadProxyClient.isAvailable()
+            Log.d("GeckoActivity", "RemoteServe 可用: $remoteServeAvailable")
+            if (remoteServeAvailable) {
+                val config = WeReadProxyClient.getConfig()
+                Log.d("GeckoActivity", "远程配置: $config")
+            }
+        }
+    }
+
+    /**
+     * 从 RemoteServe 获取 Cookie 并注入到 GeckoView
+     */
+    private fun fetchCookiesFromRemote() {
+        if (!remoteServeAvailable) return
+
+        lifecycleScope.launch {
+            try {
+                val remoteCookies = WeReadProxyClient.fetchRemoteCookies()
+                if (remoteCookies.isNotEmpty()) {
+                    Log.d("GeckoActivity", "从远程获取到 ${remoteCookies.size} 个 Cookie")
+                    for ((name, value) in remoteCookies) {
+                        WeReadProxyClient.addCookie(name, value)
+                    }
+                    session?.loadUri(currentUrl)
+                }
+            } catch (e: Exception) {
+                Log.e("GeckoActivity", "获取远程 Cookie 失败: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 将 GeckoView 的 Cookie 同步到 RemoteServe
+     */
+    private fun syncCookiesFromGecko() {
+        if (!remoteServeAvailable) return
+
+        lifecycleScope.launch {
+            try {
+                val success = WeReadProxyClient.syncCookiesToRemote()
+                if (success) {
+                    Log.d("GeckoActivity", "Cookie 同步成功")
+                }
+            } catch (e: Exception) {
+                Log.e("GeckoActivity", "同步 Cookie 失败: ${e.message}")
+            }
         }
     }
 
