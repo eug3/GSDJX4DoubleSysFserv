@@ -50,7 +50,7 @@ class CommandServiceManager(private val context: Context) {
             bound = true
             _isConnected.value = true
             service?.startForeground()
-            service?.setRemoteServeUrl("http://localhost:8080")
+            service?.setRemoteServeUrl(WeReadProxyClient.BASE_URL)
             onServiceConnected?.invoke()
         }
 

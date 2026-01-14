@@ -35,7 +35,7 @@ class CommandService : Service() {
         private const val TAG = "CommandService"
         private const val CHANNEL_ID = "command_service_channel"
         private const val NOTIFICATION_ID = 1001
-        private const val DEFAULT_URL = "http://localhost:8080"
+        private const val DEFAULT_URL = "http://172.16.8.248:8080"
 
         const val ACTION_SYNC = "com.guaishoudejia.x4doublesysfserv.ACTION_SYNC"
         const val ACTION_NEXT_PAGE = "com.guaishoudejia.x4doublesysfserv.ACTION_NEXT_PAGE"
