@@ -291,10 +291,8 @@ class BleEspClient(
      * @param pageNum 当前显示的页码
      */
     fun handlePageChangeNotification(pageNum: Int) {
-        Log.d(TAG, "Received page notification: $pageNum (triggering GeckoActivity to render and send)")
-        
-        // 直接通知调用者（通常是 GeckoActivity）发送该页面
-        // GeckoActivity 会处理：页面跳转 -> DOM 提取 -> 渲染 -> 发送
+        Log.d(TAG, "Received page notification: $pageNum")
+
         onCommand("PAGE:$pageNum")
     }
 

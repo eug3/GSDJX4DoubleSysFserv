@@ -36,14 +36,14 @@ const val PAGE_SIZE_BYTES: Int = 48000      // = 48,000 字节 ✅
 
 1. **DomLayoutRenderer.kt (第 156 行)**
    ```kotlin
-   val out48k = ByteArray(BleBookProtocol.PAGE_SIZE_BYTES)  // 使用错误的常量
+   val out48k = ByteArray(BleBookProtocol.PAGE_SIZE_BYTES)  // 使用正确的常量
    System.arraycopy(packed, 0, out48k, 0, packed.size)
    ```
 
-2. **GeckoActivity.kt (第 260 行)**
+2. **调用端**
    ```kotlin
    val render = DomLayoutRenderer.renderTo1bpp48k(layoutJson, screenshot)
-   client.sendRawBitmap(render.pageBytes48k)  // 发送 49,152 字节的数组
+   client.sendRawBitmap(render.pageBytes48k)  // 发送 48,000 字节的数组
    ```
 
 3. **BleEspClient.kt (第 180-184 行)**

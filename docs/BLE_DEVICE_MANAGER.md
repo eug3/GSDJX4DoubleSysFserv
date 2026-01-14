@@ -58,11 +58,9 @@
 
 ### 修改文件
 
-1. **GeckoActivity.kt**
-   - 添加 `BleConnectionManager` 实例
-   - 集成浮动按钮到 Ebook 模式
-   - 修改 `performSync()` 使 BLE 为可选项
-   - 添加扫描底表
+1. **MainActivity.kt**
+    - 添加 `BleConnectionManager` 实例
+    - 集成浮动按钮
 
 ---
 
@@ -70,7 +68,7 @@
 
 ### 初次连接
 
-1. 点击"启动微信内容同步"进入 Ebook 模式
+1. 启动应用
 2. 左侧出现蓝色浮动按钮（📡 未连接状态）
 3. 点击按钮展开菜单
 4. 选择"🔍 选择设备"
@@ -80,10 +78,9 @@
 
 ### 后续使用
 
-1. 进入 Ebook 模式时自动连接到上次保存的设备
+1. 启动应用时自动连接到上次保存的设备
 2. 连接成功后按钮显示为绿色
-3. 页面同步时自动发送图片数据到 BLE 设备
-4. OCR 和图片获取独立进行，不依赖 BLE 连接
+3. 数据同步时自动发送图片数据到 BLE 设备
 
 ### 切换设备
 
@@ -236,7 +233,7 @@ performSync(pageNum)
 | `BleDeviceManager` | 持久化存储 |
 | `BleEspClientOptimized` | BLE 通信 |
 | `SYNC` | 页面同步 |
-| `GeckoActivity` | 主 Activity |
+| `MainActivity` | 主 Activity |
 
 ---
 

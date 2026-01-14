@@ -15,16 +15,15 @@ android {
     defaultConfig {
         applicationId = "com.guaishoudejia.x4doublesysfserv"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         
-        // 建议：开发阶段可以只保留当前测试设备的架构（例如 arm64-v8a）来大幅减小 APK 体积
         ndk {
             abiFilters.add("arm64-v8a")
-            // abiFilters.add("armeabi-v7a") // 暂时注释掉以减小体积，如需发布再开启
+            abiFilters.add("armeabi-v7a")
         }
     }
 
@@ -43,20 +42,24 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+        // 暂时禁用 K2 编译器（如果适用）或忽略元数据版本检查以绕过内部错误
+        freeCompilerArgs = freeCompilerArgs + listOf("-Xskip-metadata-version-check")
     }
     buildFeatures {
         compose = true
     }
     packaging {
         jniLibs {
-            // 设置为 false 可以让系统直接从 APK 加载库，不需要解压，从而节省安装空间
-            // 这对于包含庞大库（如 GeckoView/ONNX）的应用非常有效
-            useLegacyPackaging = false
+            useLegacyPackaging = true
         }
     }
+    buildToolsVersion = "35.0.0"
 }
 
 dependencies {
+    // 强制使用与编译器一致的 Kotlin 版本
+    implementation(platform("org.jetbrains.kotlin:kotlin-bom:2.3.0"))
+    
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -68,11 +71,14 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.okhttp)
     implementation("androidx.browser:browser:1.8.0")
+    
+    // 使用 GeckoView（通过 WebExtension 实现流量代理）
     implementation("org.mozilla.geckoview:geckoview:+")
     
-    implementation(libs.onnxruntime.android)
-    implementation(libs.onnxruntime.extensions.android)
-
+    // TODO: 修复缺失的本地库文件
+    // implementation(files("libs/PaddlePredictor.jar"))
+    //implementation("org.opencv:opencv:4.9.0")
+    
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

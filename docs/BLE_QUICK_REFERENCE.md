@@ -85,17 +85,14 @@ app/src/main/java/com/guaishoudejia/x4doublesysfserv/
 
 ## 🔧 代码集成点
 
-### 1. GeckoActivity 中的浮动按钮
+### 1. 应用启动时的浮动按钮
 ```kotlin
-if (isEbookMode) {
-    // 左侧：BLE 浮动按钮
-    BleFloatingButton(
-        isConnected = bleConnectionManager.isConnected,
-        deviceName = bleConnectionManager.connectedDeviceName,
-        onScan = { bleConnectionManager.showScanSheet = true },
-        onForget = { bleConnectionManager.forgetDevice() }
-    )
-}
+BleFloatingButton(
+    isConnected = bleConnectionManager.isConnected,
+    deviceName = bleConnectionManager.connectedDeviceName,
+    onScan = { bleConnectionManager.showScanSheet = true },
+    onForget = { bleConnectionManager.forgetDevice() }
+)
 ```
 
 ### 2. 页面同步中的可选 BLE 发送
@@ -103,9 +100,9 @@ if (isEbookMode) {
 val bleClient = bleConnectionManager.getBleClient()
 if (bleClient != null && bleConnectionManager.isConnected) {
     try {
-        // 发送数据（可选，失败不影响OCR）
+        // 发送数据（可选，失败不影响主流程）
     } catch (e: Exception) {
-        Log.w("SYNC", "发送 BLE 数据失败（不影响 OCR）", e)
+        Log.w("SYNC", "发送 BLE 数据失败", e)
     }
 }
 ```
@@ -115,7 +112,7 @@ if (bleClient != null && bleConnectionManager.isConnected) {
 // onCreate 中
 bleConnectionManager = BleConnectionManager(this, this, lifecycleScope)
 
-// Ebook模式启动时
+// 应用启动时
 lifecycleScope.launch {
     if (bleConnectionManager.hasRequiredPermissions()) {
         bleConnectionManager.tryAutoConnect()
@@ -150,7 +147,7 @@ manager.forgetDevice()
 
 ### 查看日志
 ```bash
-adb logcat | grep -E "BleConnection|BleDevice|SYNC|GeckoActivity"
+adb logcat | grep -E "BleConnection|BleDevice"
 ```
 
 ### 检查 SharedPreferences
