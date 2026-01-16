@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
 import android.webkit.*
 import android.widget.Toast
@@ -50,8 +51,9 @@ class WeReadActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "WeReadActivity"
-        private const val OCR_SERVER = "http://192.168.31.183:8080"
+        private const val OCR_SERVER = "http://172.16.8.248:8080"
         private const val READER_PATH = "/web/reader/"
+        private const val PC_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -66,36 +68,106 @@ class WeReadActivity : ComponentActivity() {
                             WebView(ctx).apply {
                                 settings.apply {
                                     javaScriptEnabled = true
-                                    // 2. 开启 DOM 存储（用于保存登录状态和页面路由）
                                     domStorageEnabled = true
-                                    // 3. 开启数据库存储
-                                    // --- 关键修复：模拟 PC 环境必须开启以下两项 ---
-                                    useWideViewPort = true       // 关键：使 WebView 支持 HTML 的 viewport 标签
-                                    loadWithOverviewMode = true  // 关键：缩放至屏幕大小
+                                    useWideViewPort = true
+                                    loadWithOverviewMode = true
                                     databaseEnabled = true
-                                   // userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+//                                    userAgentString = PC_UA
                                     javaScriptCanOpenWindowsAutomatically = true
                                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-
                                 }
+                                
+                                webChromeClient = object : WebChromeClient() {
+                                    override fun onConsoleMessage(cm: ConsoleMessage?): Boolean {
+                                        Log.d("WeReadJS", "[${cm?.messageLevel()}] ${cm?.message()}")
+                                        return true
+                                    }
+                                }
+
                                 webViewClient = object : WebViewClient() {
-                                    // 关键：拦截跳转逻辑，返回 false 表示由当前 WebView 处理，不跳转到系统浏览器
                                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                                        return  false;
+                                        return false
+                                    }
+
+                                    override fun onPageFinished(view: WebView?, url: String?) {
+                                        super.onPageFinished(view, url)
+                                        Log.d(TAG, "页面加载完成: $url")
+
+                                        // 严格匹配首页
+                                        if (url == "https://weread.qq.com" || url == "https://weread.qq.com/") {
+                                            view?.evaluateJavascript("""
+                                                (function() {
+                                                    // 如果已经开始检测或已经点击，则不再执行
+                                                    if (window.__weReadLoginDetectionStarted) return;
+                                                    window.__weReadLoginDetectionStarted = true;
+                                                    
+                                                    console.log('开始检测登录按钮...');
+                                                    var count = 0;
+                                                    var timer = setInterval(function() {
+                                                        count++;
+                                                        
+                                                        // 再次检查标记，防止异步竞争
+                                                        if (window.__weReadLoginClicked) {
+                                                            clearInterval(timer);
+                                                            return;
+                                                        }
+
+                                                        var loginLink = null;
+                                                        // 1. 获取所有具有该类名的 a 标签并寻找包含“登录”文本的
+                                                        var candidates = document.querySelectorAll('a.wr_index_page_top_section_header_action_link');
+                                                        for (var i = 0; i < candidates.length; i++) {
+                                                            if (candidates[i].innerText.indexOf('登录') !== -1) {
+                                                                loginLink = candidates[i];
+                                                                break;
+                                                            }
+                                                        }
+                                                        
+                                                        // 2. 如果没找到，兜底：遍历页面所有 a 标签寻找“登录”
+                                                        if (!loginLink) {
+                                                            var anchors = document.getElementsByTagName('a');
+                                                            for (var j = 0; j < anchors.length; j++) {
+                                                                if (anchors[j].innerText.indexOf('登录') !== -1) {
+                                                                    loginLink = anchors[j];
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if (loginLink) {
+                                                            console.log('执行点击: ' + loginLink.innerText);
+                                                            // 标记已点击，防止重复执行
+                                                            window.__weReadLoginClicked = true;
+                                                            loginLink.click();
+                                                            
+                                                            // 模拟原生点击事件
+                                                            var clickEvent = new MouseEvent('click', {
+                                                                'view': window,
+                                                                'bubbles': true,
+                                                                'cancelable': true
+                                                            });
+                                                            loginLink.dispatchEvent(clickEvent);
+                                                            
+                                                            clearInterval(timer);
+                                                        }
+
+                                                        if (count > 30) {
+                                                            clearInterval(timer);
+                                                        }
+                                                    }, 500);
+                                                })();
+                                            """.trimIndent(), null)
+                                        }
                                     }
 
                                     override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                                         super.doUpdateVisitedHistory(view, url, isReload)
                                         url?.let {
-                                            Log.d("WeReadActivity", "检测到路径变化: $it")
                                             if (isReaderUrl(it)) {
-                                                checkAndOcr(it) // 触发你的 OCR 逻辑
+                                                checkAndOcr(it)
                                             }
                                         }
                                     }
                                 }
-//
-
                                 loadUrl("https://weread.qq.com")
                                 webView = this
                             }
@@ -126,23 +198,30 @@ class WeReadActivity : ComponentActivity() {
     private fun checkAndOcr(url: String) {
         if (processedUrls.contains(url)) return
         processedUrls.add(url)
-
-        Log.d(TAG, "OCR: $url")
         ocr(url) { processedUrls.remove(url) }
     }
 
     private fun ocr(url: String, onComplete: () -> Unit) {
+        val cookies = CookieManager.getInstance().getCookie(url)
+        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+        
         lifecycleScope.launch(Dispatchers.IO) {
             try {
+                val jsonBody = JSONObject().apply {
+                    put("url", url)
+                    put("cookies", cookies ?: "")
+                    put("device_id", deviceId ?: "")
+                }
+
                 val resp = okHttpClient.newCall(Request.Builder()
                     .url("$OCR_SERVER/api/weread/reader/ocr")
-                    .post(JSONObject().put("url", url).toString()
-                        .toRequestBody("application/json".toMediaType()))
+                    .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
                     .build()).execute()
 
+                val bodyStr = resp.body?.string()
                 withContext(Dispatchers.Main) {
-                    if (resp.isSuccessful) {
-                        val text = JSONObject(resp.body?.string() ?: "{}").optString("text", "")
+                    if (resp.isSuccessful && bodyStr != null) {
+                        val text = JSONObject(bodyStr).optString("text", "")
                         sendBle(text)
                     }
                     onComplete()
@@ -169,7 +248,6 @@ class WeReadActivity : ComponentActivity() {
     }
 
     private fun scanDevice() = startActivity(Intent(this, DeviceScanActivity::class.java))
-
     private fun showDevice() = Toast.makeText(this, connectedDeviceName, Toast.LENGTH_SHORT).show()
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
