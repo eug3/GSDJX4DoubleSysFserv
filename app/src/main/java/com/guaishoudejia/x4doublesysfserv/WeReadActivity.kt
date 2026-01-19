@@ -49,6 +49,129 @@ class WeReadActivity : ComponentActivity() {
         (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
     }
 
+    private var currentPageUrl: String? = null
+    private var currentLogicalIndex = 0
+
+    // ============ 场景 1: 首页初始化 ============
+    // action="current", url=Android提供的初始url → RemoteServe在该页面执行
+    private suspend fun handleFirstPage() {
+        if (currentPageUrl == null) {
+            currentPageUrl = getInitialPageUrl()
+        }
+        
+        Log.i(TAG, "[ACTION] Init first page - action=current, url=$currentPageUrl")
+        
+        try {
+            val response = remoteServeClient.getPageContent(
+                action = "current",
+                url = currentPageUrl  // Android 指定的初始页面 url
+            )
+            
+            // 首页返回时 url 通常不变（RemoteServe 在该页面执行）
+            currentLogicalIndex = 0
+            
+            Log.d(TAG, "[FIRST_PAGE] url=$currentPageUrl (unchanged), logicalIndex=$currentLogicalIndex")
+            
+            response.content?.let { content ->
+                bleClient.sendPageToDevice(content, currentLogicalIndex, "first")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[FIRST_PAGE] Error", e)
+        }
+    }
+
+    private fun getInitialPageUrl(): String {
+        // 可以从以下来源获取：
+        // 1. EPUB 文件的第一页
+        // 2. SharedPreferences (上次阅读位置)
+        // 3. 数据库
+        // 4. 默认值
+        
+        return try {
+            val preferences = getSharedPreferences("reading_progress", Context.MODE_PRIVATE)
+            preferences.getString("last_page_url", "default_page_url") ?: "default_page_url"
+        } catch (e: Exception) {
+            Log.w(TAG, "[CONFIG] Using default initial URL")
+            "default_page_url"
+        }
+    }
+
+    // ============ 场景 2: 翻页请求 ============
+    // action="next/prev", url=当前页 → RemoteServe在该页面上执行翻页，返回新页url和内容
+    private suspend fun handleNextPage() {
+        Log.i(TAG, "[ACTION] Next page - action=next, url=$currentPageUrl")
+        
+        try {
+            val response = remoteServeClient.getPageContent(
+                action = "next",
+                url = currentPageUrl  // 告诉 RemoteServe 在这个页面上翻到下一页
+            )
+            
+            // RemoteServe 在当前页面执行翻页后，返回新页的 url
+            val newUrl = response.url
+            if (newUrl != null && newUrl != currentPageUrl) {
+                currentPageUrl = newUrl      // 更新为新页的 url
+                currentLogicalIndex++
+                Log.d(TAG, "[NEXT_PAGE] url changed: $currentPageUrl, logicalIndex=$currentLogicalIndex")
+                
+                // 保存阅读进度
+                saveReadingProgress(currentPageUrl, currentLogicalIndex)
+            } else {
+                Log.w(TAG, "[NEXT_PAGE] No url change from RemoteServe")
+            }
+            
+            response.content?.let { content ->
+                bleClient.sendPageToDevice(content, currentLogicalIndex, "next")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[NEXT_PAGE] Error", e)
+        }
+    }
+
+    private suspend fun handlePrevPage() {
+        Log.i(TAG, "[ACTION] Previous page - action=prev, url=$currentPageUrl")
+        
+        try {
+            val response = remoteServeClient.getPageContent(
+                action = "prev",
+                url = currentPageUrl  // 告诉 RemoteServe 在这个页面上翻到上一页
+            )
+            
+            // RemoteServe 在当前页面执行翻页后，返回新页的 url
+            val newUrl = response.url
+            if (newUrl != null && newUrl != currentPageUrl) {
+                currentPageUrl = newUrl      // 更新为新页的 url
+                if (currentLogicalIndex > 0) currentLogicalIndex--
+                Log.d(TAG, "[PREV_PAGE] url changed: $currentPageUrl, logicalIndex=$currentLogicalIndex")
+                
+                // 保存阅读进度
+                saveReadingProgress(currentPageUrl, currentLogicalIndex)
+            } else {
+                Log.w(TAG, "[PREV_PAGE] No url change from RemoteServe")
+            }
+            
+            response.content?.let { content ->
+                bleClient.sendPageToDevice(content, currentLogicalIndex, "prev")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[PREV_PAGE] Error", e)
+        }
+    }
+
+    private fun saveReadingProgress(pageUrl: String?, logicalIndex: Int) {
+        try {
+            val preferences = getSharedPreferences("reading_progress", Context.MODE_PRIVATE)
+            preferences.edit().apply {
+                putString("last_page_url", pageUrl)
+                putInt("last_logical_index", logicalIndex)
+                apply()
+            }
+            Log.d(TAG, "[SAVE] Progress saved: $pageUrl @ $logicalIndex")
+        } catch (e: Exception) {
+            Log.e(TAG, "[SAVE] Error saving progress", e)
+        }
+    }
+
     companion object {
         private const val TAG = "WeReadActivity"
         private const val OCR_SERVER = "http://172.16.8.248:8080"
