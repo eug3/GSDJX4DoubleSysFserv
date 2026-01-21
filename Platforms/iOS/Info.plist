@@ -28,5 +28,11 @@
 	</array>
 	<key>XSAppIconAssets</key>
 	<string>Assets.xcassets/appicon.appiconset</string>
+	<!-- 蓝牙权限 - iOS 13+ -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>需要蓝牙连接以与外部设备通信</string>
+	<!-- 蓝牙权限 - iOS 12 及之前版本 (兼容性) -->
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>需要蓝牙连接以与外部设备通信</string>
 </dict>
 </plist>

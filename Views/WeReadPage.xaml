@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="GSDJX4DoubleSysFserv.Views.WeReadPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    Title="微信读书"
+    Loaded="ContentPage_Loaded"
+    Unloaded="ContentPage_Unloaded">
+
+    <Grid>
+        <!-- WebView 浏览器 -->
+        <WebView x:Name="WebView" Source="https://weread.qq.com/" Navigated="WebView_Navigated" />
+
+        <!-- 左侧浮动按钮 - 仅在阅读页且蓝牙已连接时显示 -->
+        <Button
+            x:Name="FloatingButton"
+            Text="📖"
+            FontSize="24"
+            WidthRequest="50"
+            HeightRequest="50"
+            CornerRadius="25"
+            BackgroundColor="#07C160"
+            TextColor="White"
+            HorizontalOptions="Start"
+            VerticalOptions="Center"
+            Margin="10,0,0,0"
+            IsVisible="False"
+            Clicked="FloatingButton_Clicked"
+            Shadow="{Shadow Brush=Black, Offset=5,5}" />
+    </Grid>
+</ContentPage>
