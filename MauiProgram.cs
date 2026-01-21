@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Shiny;
 using GSDJX4DoubleSysFserv.Services;
 
 namespace GSDJX4DoubleSysFserv;
@@ -16,22 +17,19 @@ public static class MauiProgram
                 fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
             });
 
-        // 注册服务
+        // 注册 Shiny.NET BluetoothLE (3.x API)
+        builder.Services.AddBluetoothLE<ShinyBleDelegate>();
+
+        // 注册自定义服务
         builder.Services.AddSingleton<IStorageService, StorageService>();
 
-        // 根据平台注册蓝牙服务
-#if ANDROID
-        builder.Services.AddSingleton<IBleService, BleServiceAndroid>();
-#elif IOS || MACCATALYST
-        builder.Services.AddSingleton<IBleService, BleServiceApple>();
-#else
-        builder.Services.AddSingleton<IBleService, BleServiceAndroid>();
-#endif
+        // 注册蓝牙服务（统一使用 Shiny 实现）
+        builder.Services.AddSingleton<IBleService, ShinyBleService>();
 
         // 注册页面
         builder.Services.AddTransient<Views.WeReadPage>();
         builder.Services.AddTransient<Views.SettingsPage>();
-         builder.Services.AddTransient<Views.BleDevicesPage>();
+        builder.Services.AddTransient<Views.BleDevicesPage>();
 
 #if DEBUG
         builder.Logging.AddDebug();

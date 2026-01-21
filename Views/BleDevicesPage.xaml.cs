@@ -40,6 +40,17 @@ public partial class BleDevicesPage : ContentPage
                 locationStatus = await Permissions.RequestAsync<Permissions.LocationWhenInUse>();
             }
         }
+#elif IOS
+        // iOS 需要请求蓝牙权限
+        var status = await Permissions.CheckStatusAsync<Permissions.Bluetooth>();
+        if (status != PermissionStatus.Granted)
+        {
+            status = await Permissions.RequestAsync<Permissions.Bluetooth>();
+            if (status != PermissionStatus.Granted)
+            {
+                await DisplayAlertAsync("权限被拒绝", "应用需要蓝牙权限才能扫描设备", "确定");
+            }
+        }
 #endif
     }
 

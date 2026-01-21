@@ -79,6 +79,20 @@ public partial class SettingsPage : ContentPage
 
     private async void ScanButton_Clicked(object? sender, EventArgs e)
     {
+#if IOS
+        // iOS: 检查并请求蓝牙权限
+        var status = await Permissions.CheckStatusAsync<Permissions.Bluetooth>();
+        if (status != PermissionStatus.Granted)
+        {
+            status = await Permissions.RequestAsync<Permissions.Bluetooth>();
+            if (status != PermissionStatus.Granted)
+            {
+                await DisplayAlertAsync("权限被拒绝", "应用需要蓝牙权限才能扫描设备", "确定");
+                return;
+            }
+        }
+#endif
+
         _devices.Clear();
         DeviceListView.IsVisible = true;
         ScanningIndicator.IsVisible = true;
