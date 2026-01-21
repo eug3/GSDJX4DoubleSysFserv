@@ -68,7 +68,7 @@ public partial class SettingsPage : ContentPage
             if (connected)
             {
                 UpdateConnectionStatus();
-                await DisplayAlert("提示", "自动连接成功", "确定");
+                await DisplayAlertAsync("提示", "自动连接成功", "确定");
             }
         }
         catch (Exception ex)
@@ -95,12 +95,12 @@ public partial class SettingsPage : ContentPage
 
             if (_devices.Count == 0)
             {
-                await DisplayAlert("提示", "未扫描到蓝牙设备", "确定");
+                await DisplayAlertAsync("提示", "未扫描到蓝牙设备", "确定");
             }
         }
         catch (Exception ex)
         {
-            await DisplayAlert("错误", $"扫描失败: {ex.Message}", "确定");
+            await DisplayAlertAsync("错误", $"扫描失败: {ex.Message}", "确定");
         }
         finally
         {
@@ -126,16 +126,16 @@ public partial class SettingsPage : ContentPage
                     DeviceListView.IsVisible = false;
                     UpdateConnectionStatus();
                     LoadSavedDevice();
-                    await DisplayAlert("成功", $"已连接到 {device.Name}", "确定");
+                    await DisplayAlertAsync("成功", $"已连接到 {device.Name}", "确定");
                 }
                 else
                 {
-                    await DisplayAlert("失败", "连接失败", "确定");
+                    await DisplayAlertAsync("失败", "连接失败", "确定");
                 }
             }
             catch (Exception ex)
             {
-                await DisplayAlert("错误", $"连接错误: {ex.Message}", "确定");
+                await DisplayAlertAsync("错误", $"连接错误: {ex.Message}", "确定");
             }
             finally
             {
@@ -147,13 +147,13 @@ public partial class SettingsPage : ContentPage
 
     private async void DeleteButton_Clicked(object? sender, EventArgs e)
     {
-        var result = await DisplayAlert("确认", "删除已保存的蓝牙连接？", "确定", "取消");
+        var result = await DisplayAlertAsync("确认", "删除已保存的蓝牙连接？", "确定", "取消");
         if (result)
         {
             await _bleService.DeleteSavedMacAddress();
             SavedDeviceFrame.IsVisible = false;
             UpdateConnectionStatus();
-            await DisplayAlert("提示", "已删除", "确定");
+            await DisplayAlertAsync("提示", "已删除", "确定");
         }
     }
 }

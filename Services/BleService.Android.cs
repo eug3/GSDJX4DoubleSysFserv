@@ -89,20 +89,41 @@ public class BleServiceAndroid : IBleService
         if (_adapter == null || !_adapter.IsEnabled)
             return devices;
 
-        var pairedDevices = _adapter.BondedDevices;
-        foreach (var device in pairedDevices)
+        var pairedDevices = _adapter?.BondedDevices;
+        if (pairedDevices != null)
         {
-            devices.Add(new BleDeviceInfo
+            foreach (var device in pairedDevices)
             {
-                Id = device.Address,
-                Name = device.Name ?? "Unknown Device",
-                MacAddress = device.Address
-            });
+                devices.Add(new BleDeviceInfo
+                {
+                    Id = device.Address ?? "",
+                    Name = device.Name ?? "Unknown Device",
+                    MacAddress = device.Address ?? ""
+                });
+            }
         }
 
         return devices;
     }
 
-    private readonly BluetoothGattCallback _gattCallback = new();
+    private readonly BluetoothGattCallback _gattCallback = new GattCallback();
+
+    /// <summary>
+    /// 蓝牙 GATT 回调实现
+    /// </summary>
+    private class GattCallback : BluetoothGattCallback
+    {
+        public override void OnConnectionStateChange(BluetoothGatt? gatt, GattStatus status, ProfileState newState)
+        {
+            base.OnConnectionStateChange(gatt, status, newState);
+            System.Diagnostics.Debug.WriteLine($"GATT Connection State: {newState}, Status: {status}");
+        }
+
+        public override void OnServicesDiscovered(BluetoothGatt? gatt, GattStatus status)
+        {
+            base.OnServicesDiscovered(gatt, status);
+            System.Diagnostics.Debug.WriteLine($"Services Discovered: {status}");
+        }
+    }
 }
 #endif
