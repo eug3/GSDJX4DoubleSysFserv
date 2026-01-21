@@ -4,8 +4,9 @@
 <dict>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-        <key>CFBundleExecutable</key>
-        <string>GSDJX4DoubleSysFserv</string>
+	<key>CFBundleExecutable</key>
+	<string>GSDJX4DoubleSysFserv</string>
+	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>arm64</string>
 	</array>
