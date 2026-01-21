@@ -16,6 +16,33 @@ public partial class BleDevicesPage : ContentPage
         _bleService = bleService;
     }
 
+    protected override async void OnAppearing()
+    {
+        base.OnAppearing();
+        await CheckAndRequestPermissions();
+    }
+
+    private async Task CheckAndRequestPermissions()
+    {
+#if ANDROID
+        var status = await Permissions.CheckStatusAsync<Permissions.Bluetooth>();
+        if (status != PermissionStatus.Granted)
+        {
+            status = await Permissions.RequestAsync<Permissions.Bluetooth>();
+        }
+
+        // Android 11 及以下需要位置权限
+        if (Android.OS.Build.VERSION.SdkInt < Android.OS.BuildVersionCodes.S)
+        {
+            var locationStatus = await Permissions.CheckStatusAsync<Permissions.LocationWhenInUse>();
+            if (locationStatus != PermissionStatus.Granted)
+            {
+                locationStatus = await Permissions.RequestAsync<Permissions.LocationWhenInUse>();
+            }
+        }
+#endif
+    }
+
     private async void ScanButton_Clicked(object? sender, EventArgs e)
     {
         ScanningIndicator.IsRunning = true;

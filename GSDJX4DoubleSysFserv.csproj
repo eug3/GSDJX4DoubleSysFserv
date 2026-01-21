@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<TargetFrameworks>net10.0-android;net10.0-ios;net10.0-maccatalyst</TargetFrameworks>
+		<TargetFrameworks>net10.0-android;net10.0-ios</TargetFrameworks>
 		<TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('windows'))">$(TargetFrameworks);net10.0-windows10.0.19041.0</TargetFrameworks>
 
 		<!-- Note for MacCatalyst:
@@ -28,13 +28,10 @@
 		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
 		<ApplicationVersion>1</ApplicationVersion>
 
-		<!-- iOS Signing -->
-		<CodesignKey>Apple Development: JUN YIN (AHDEY625MZ)</CodesignKey>
-		<CodesignProvision>Automatic:AdHoc</CodesignProvision>
-		<IPhoneResourcePrefix>Resources</IPhoneResourcePrefix>
-		<!-- 启用自动签名 -->
-		<MtouchAutomaticSigning>true</MtouchAutomaticSigning>
+		<!-- iOS Code Signing Configuration -->
 		<DevelopmentTeam>CZAMASLCUC</DevelopmentTeam>
+		<MtouchAutomaticSigning>true</MtouchAutomaticSigning>
+		<IPhoneResourcePrefix>Resources</IPhoneResourcePrefix>
 
 		<!-- To develop, package, and publish an app to the Microsoft Store, see: https://aka.ms/MauiTemplateUnpackaged -->
 		<WindowsPackageType>None</WindowsPackageType>
@@ -50,22 +47,21 @@
 		<EnableCodeSigning Condition="'$(TargetFramework)' == 'net10.0-ios'">true</EnableCodeSigning>
 	</PropertyGroup>
 
-	<!-- iOS 真机调试配置 -->
+	<!-- iOS Device (真机) 调试配置 -->
 	<PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-ios' and '$(RuntimeIdentifier)' == 'ios-arm64'">
+		<RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
 		<CodesignEntitlements>Platforms/iOS/Entitlements.plist</CodesignEntitlements>
-		<CodesignKey>Apple Development: JUN YIN (AHDEY625MZ)</CodesignKey>
-		<CodesignProvision>Automatic</CodesignProvision>
 		<MtouchUseLlvm>true</MtouchUseLlvm>
 		<MtouchDebug>true</MtouchDebug>
-		<IPhoneResourcePrefix>Resources</IPhoneResourcePrefix>
-		<RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
+		<!-- 优化部署速度 -->
+		<MtouchInstallTimeout>120</MtouchInstallTimeout>
+		<MtouchUseHttps>false</MtouchUseHttps>
+		<MtouchClean>false</MtouchClean>
 	</PropertyGroup>
 
-	<!-- iOS Simulator 配置 - 禁用代码签名 -->
+	<!-- iOS Simulator 配置 (无需代码签名) -->
 	<PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-ios' and '$(RuntimeIdentifier)' == 'iossimulator-arm64'">
-		<CodesignKey></CodesignKey>
-		<CodesignProvision></CodesignProvision>
-		<CodesignEntitlements></CodesignEntitlements>
+		<RuntimeIdentifier>iossimulator-arm64</RuntimeIdentifier>
 	</PropertyGroup>
 
 	<ItemGroup>

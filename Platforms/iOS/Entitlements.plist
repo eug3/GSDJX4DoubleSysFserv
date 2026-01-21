@@ -6,12 +6,5 @@
 	<string>$(AppIdentifierPrefix)com.guaishoudejia.gsdjx4doublesysfserv</string>
 	<key>get-task-allow</key>
 	<true/>
-	<key>keychain-access-groups</key>
-	<array>
-		<string>$(AppIdentifierPrefix)com.guaishoudejia.gsdjx4doublesysfserv</string>
-	</array>
-	<!-- 蓝牙后台模式 Entitlement -->
-	<key>com.apple.developer.bluetooth-le</key>
-	<true/>
 </dict>
 </plist>

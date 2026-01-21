@@ -6,17 +6,19 @@ using System.Collections.ObjectModel;
 namespace GSDJX4DoubleSysFserv.Services;
 
 /// <summary>
-/// 蓝牙服务 iOS/MacCatalyst 实现
+/// 蓝牙服务 iOS/MacCatalyst 实现 - 支持后台模式
 /// </summary>
 public class BleServiceApple : IBleService
 {
     private const string SavedMacKey = "Ble_SavedMacAddress";
+    private const string CentralManagerRestoreIdentifier = "com.guaishoudejia.gsdjx4doublesysfserv.ble";
     private readonly IStorageService _storageService;
     private CBCentralManager? _centralManager;
     private CBPeripheral? _connectedPeripheral;
     private readonly Dictionary<string, CBPeripheral> _discoveredPeripherals = new();
     private TaskCompletionSource<ObservableCollection<BleDeviceInfo>>? _scanTcs;
     private ObservableCollection<BleDeviceInfo>? _scannedDevices;
+    private bool _shouldAutoReconnect = true;
 
     public bool IsConnected { get; private set; }
     public string? ConnectedDeviceName { get; private set; }
@@ -29,7 +31,14 @@ public class BleServiceApple : IBleService
 
     private void InitializeCentralManager()
     {
-        _centralManager = new CBCentralManager(new CentralManagerDelegate(this), null);
+        // 使用 RestoreIdentifier 启用后台状态恢复
+        var options = new CBCentralInitOptions
+        {
+            RestoreIdentifier = CentralManagerRestoreIdentifier,
+            ShowPowerAlert = true
+        };
+        _centralManager = new CBCentralManager(new CentralManagerDelegate(this), null, options);
+        System.Diagnostics.Debug.WriteLine($"BLE: CentralManager 初始化完成，RestoreIdentifier: {CentralManagerRestoreIdentifier}");
     }
 
     public async Task<string?> GetSavedMacAddress()
@@ -134,6 +143,50 @@ public class BleServiceApple : IBleService
         IsConnected = false;
         ConnectedDeviceName = null;
         System.Diagnostics.Debug.WriteLine($"BLE: 已断开连接 - {error?.LocalizedDescription}");
+        
+        // 后台自动重连
+        if (_shouldAutoReconnect && _connectedPeripheral != null)
+        {
+            System.Diagnostics.Debug.WriteLine("BLE: 尝试自动重连...");
+            _centralManager?.ConnectPeripheral(_connectedPeripheral, new PeripheralConnectionOptions
+            {
+                NotifyOnConnection = true,
+                NotifyOnDisconnection = true,
+                NotifyOnNotification = true
+            });
+        }
+    }
+
+    private void OnWillRestoreState(NSDictionary dict)
+    {
+        System.Diagnostics.Debug.WriteLine("BLE: 后台恢复状态...");
+        
+        // 恢复已连接的外设
+        if (dict.ContainsKey(CBCentralManager.RestoredStatePeripheralsKey))
+        {
+            var peripherals = dict[CBCentralManager.RestoredStatePeripheralsKey] as NSArray;
+            if (peripherals != null && peripherals.Count > 0)
+            {
+                for (nuint i = 0; i < peripherals.Count; i++)
+                {
+                    var peripheral = peripherals.GetItem<CBPeripheral>(i);
+                    if (peripheral != null)
+                    {
+                        _connectedPeripheral = peripheral;
+                        _discoveredPeripherals[peripheral.Identifier.ToString()] = peripheral;
+                        System.Diagnostics.Debug.WriteLine($"BLE: 恢复外设 - {peripheral.Name}");
+                        
+                        // 重新连接
+                        _centralManager?.ConnectPeripheral(peripheral, new PeripheralConnectionOptions
+                        {
+                            NotifyOnConnection = true,
+                            NotifyOnDisconnection = true,
+                            NotifyOnNotification = true
+                        });
+                    }
+                }
+            }
+        }
     }
 
     private void OnStateUpdated(CBManagerState state)
@@ -169,6 +222,11 @@ public class BleServiceApple : IBleService
         public override void DisconnectedPeripheral(CBCentralManager central, CBPeripheral peripheral, NSError? error)
         {
             _service.OnDisconnectedPeripheral(peripheral, error);
+        }
+
+        public override void WillRestoreState(CBCentralManager central, NSDictionary dict)
+        {
+            _service.OnWillRestoreState(dict);
         }
     }
 }

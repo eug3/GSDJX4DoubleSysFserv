@@ -176,3 +176,5 @@ coverage/
 *.tmp
 *.temp
 *.bak
+
+.fake
