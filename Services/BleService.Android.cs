@@ -146,9 +146,15 @@ public class BleServiceAndroid : IBleService
     private void OnDeviceFound(BluetoothDevice device, int rssi)
     {
         var deviceId = device.Address ?? "";
-        var deviceName = device.Name ?? "未知设备";
+        var deviceName = device.Name;
 
-        if (!_discoveredDevices.ContainsKey(deviceId) && !string.IsNullOrEmpty(deviceId))
+        // 过滤掉没有名字的设备
+        if (string.IsNullOrWhiteSpace(deviceName) || string.IsNullOrEmpty(deviceId))
+        {
+            return;
+        }
+
+        if (!_discoveredDevices.ContainsKey(deviceId))
         {
             _discoveredDevices[deviceId] = device;
 

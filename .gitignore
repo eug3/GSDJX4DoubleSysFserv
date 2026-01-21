@@ -178,3 +178,6 @@ coverage/
 *.bak
 
 .fake
+app/src/main/assets/models_onnx/pplcnet_x0_25_textline_ori.onnx
+app/src/main/assets/models_onnx/ppocrv5_mobile_det.onnx
+app/src/main/assets/models_onnx/ppocrv5_mobile_rec.onnx

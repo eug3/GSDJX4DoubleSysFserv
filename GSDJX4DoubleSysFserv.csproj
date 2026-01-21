@@ -36,6 +36,14 @@
 		<!-- To develop, package, and publish an app to the Microsoft Store, see: https://aka.ms/MauiTemplateUnpackaged -->
 		<WindowsPackageType>None</WindowsPackageType>
 
+		<!-- Android 配置 -->
+		<AndroidSdkTargetVersion>29</AndroidSdkTargetVersion>
+		<AndroidApiLevel>29</AndroidApiLevel>
+		<AndroidEnableLatestTargetFrameworkVersion>false</AndroidEnableLatestTargetFrameworkVersion>
+		<AndroidUseLatestPlatformSdk>false</AndroidUseLatestPlatformSdk>
+		<TargetFrameworkVersion>v13.0</TargetFrameworkVersion>
+		<RuntimeIdentifiers Condition="'$(TargetFramework)' == 'net10.0-android'">android-arm;android-arm64;android-x86;android-x64</RuntimeIdentifiers>
+		
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
 		<TargetOSVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">26.0</TargetOSVersion>
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">15.0</SupportedOSPlatformVersion>
@@ -87,7 +95,9 @@
 		<PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
 		<!-- Shiny.NET Bluetooth -->
-		<PackageReference Include="Shiny.BluetoothLE" Version="3.0.0" />
+		<PackageReference Include="Shiny.BluetoothLE" Version="3.3.4" />
+		<PackageReference Include="Shiny.Core" Version="3.3.4" />
+		<PackageReference Include="Shiny.Hosting.Maui" Version="3.3.4" />
 	</ItemGroup>
 
 </Project>

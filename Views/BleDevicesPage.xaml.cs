@@ -134,3 +134,5 @@ public partial class BleDevicesPage : ContentPage
         await Navigation.PopAsync();
     }
 }
+
+

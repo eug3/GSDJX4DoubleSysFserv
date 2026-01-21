@@ -11,6 +11,7 @@ public static class MauiProgram
         var builder = MauiApp.CreateBuilder();
         builder
             .UseMauiApp<App>()
+            .UseShiny()
             .ConfigureFonts(fonts =>
             {
                 fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
@@ -29,7 +30,6 @@ public static class MauiProgram
         // 注册页面
         builder.Services.AddTransient<Views.WeReadPage>();
         builder.Services.AddTransient<Views.SettingsPage>();
-        builder.Services.AddTransient<Views.BleDevicesPage>();
 
 #if DEBUG
         builder.Logging.AddDebug();

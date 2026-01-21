@@ -6,16 +6,22 @@
     xmlns:views="clr-namespace:GSDJX4DoubleSysFserv.Views"
     Title="GSDJX4DoubleSysFserv">
 
-    <TabBar>
+    <FlyoutItem
+        Title="微信读书"
+        Icon="book.png">
         <ShellContent
             Title="微信读书"
             ContentTemplate="{DataTemplate views:WeReadPage}"
             Route="WeReadPage" />
+    </FlyoutItem>
 
+    <FlyoutItem
+        Title="设置"
+        Icon="settings.png">
         <ShellContent
             Title="设置"
             ContentTemplate="{DataTemplate views:SettingsPage}"
             Route="SettingsPage" />
-    </TabBar>
+    </FlyoutItem>
 
 </Shell>

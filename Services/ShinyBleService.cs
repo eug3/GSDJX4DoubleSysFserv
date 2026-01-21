@@ -129,7 +129,13 @@ public class ShinyBleService : IBleService
                 {
                     var peripheral = scanResult.Peripheral;
                     var deviceId = peripheral.Uuid.ToString();
-                    var deviceName = peripheral.Name ?? "未知设备";
+                    var deviceName = peripheral.Name;
+
+                    // 过滤掉没有名字的设备
+                    if (string.IsNullOrWhiteSpace(deviceName))
+                    {
+                        return;
+                    }
 
                     if (!_discoveredPeripherals.ContainsKey(deviceId))
                     {
