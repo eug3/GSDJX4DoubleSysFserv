@@ -6,16 +6,29 @@
     Title="设置">
 
     <ScrollView>
-        <VerticalStackLayout Padding="20" Spacing="20">
+        <VerticalStackLayout Padding="20"
+                Spacing="20">
             <!-- 蓝牙连接区域 -->
-            <Border BackgroundColor="LightGray" Padding="15" StrokeThickness="0" StrokeShape="RoundRectangle 10">
+            <Border BackgroundColor="LightGray"
+                    Padding="15"
+                    StrokeThickness="0"
+                    StrokeShape="RoundRectangle 10">
                 <VerticalStackLayout Spacing="10">
-                    <Label Text="蓝牙连接" FontSize="18" FontAttributes="Bold" />
+                    <Label Text="蓝牙连接"
+                            FontSize="18"
+                            FontAttributes="Bold"/>
 
                     <!-- 当前连接状态 -->
                     <HorizontalStackLayout Spacing="10">
-                        <BoxView x:Name="StatusIndicator" WidthRequest="12" HeightRequest="12" CornerRadius="6" BackgroundColor="Gray" />
-                        <Label x:Name="StatusLabel" Text="未连接" FontSize="14" VerticalOptions="Center" />
+                        <BoxView x:Name="StatusIndicator"
+                                WidthRequest="12"
+                                HeightRequest="12"
+                                CornerRadius="6"
+                                BackgroundColor="Gray"/>
+                        <Label x:Name="StatusLabel"
+                                Text="未连接"
+                                FontSize="14"
+                                VerticalOptions="Center"/>
                     </HorizontalStackLayout>
 
                     <!-- 扫描按钮 -->
@@ -23,45 +36,73 @@
                         x:Name="ScanButton"
                         Text="扫描蓝牙设备"
                         Clicked="ScanButton_Clicked"
-                        IsEnabled="True" />
+                        IsEnabled="True"/>
 
                     <!-- 设备列表 -->
-                    <CollectionView x:Name="DeviceListView" HeightRequest="200" IsVisible="False">
+                    <CollectionView x:Name="DeviceListView"
+                            HeightRequest="200"
+                            IsVisible="False">
                         <CollectionView.ItemTemplate>
                             <DataTemplate>
-                                <Border Padding="10" Margin="0,5" BackgroundColor="White" StrokeThickness="0" StrokeShape="RoundRectangle 5">
-                                    <HorizontalStackLayout>
-                                        <VerticalStackLayout HorizontalOptions="FillAndExpand">
-                                            <Label Text="{Binding Name}" FontSize="16" />
-                                            <Label Text="{Binding MacAddress}" FontSize="12" TextColor="Gray" />
+                                <Border Padding="10"
+                                        Margin="0,5"
+                                        BackgroundColor="White"
+                                        StrokeThickness="0"
+                                        StrokeShape="RoundRectangle 5">
+                                    <Grid ColumnDefinitions="*,Auto"
+                                            ColumnSpacing="10">
+                                        <VerticalStackLayout Grid.Column="0"
+                                                VerticalOptions="Center">
+                                            <Label Text="{Binding Name}"
+                                                    FontSize="14"/>
                                         </VerticalStackLayout>
                                         <Button
+                                            Grid.Column="1"
                                             Text="连接"
                                             Clicked="ConnectButton_Clicked"
                                             CommandParameter="{Binding .}"
-                                            BackgroundColor="#07C160" />
-                                    </HorizontalStackLayout>
+                                            BackgroundColor="#07C160"
+                                            HorizontalOptions="End"
+                                            VerticalOptions="Center"
+                                            Padding="20,8"/>
+                                    </Grid>
                                 </Border>
                             </DataTemplate>
                         </CollectionView.ItemTemplate>
                     </CollectionView>
 
                     <!-- 已保存设备信息 -->
-                    <Border x:Name="SavedDeviceFrame" Padding="10" Margin="0,5" BackgroundColor="#E8F5E9" IsVisible="False" StrokeThickness="0" StrokeShape="RoundRectangle 5">
+                    <Border x:Name="SavedDeviceFrame"
+                            Padding="10"
+                            Margin="0,5"
+                            BackgroundColor="#E8F5E9"
+                            IsVisible="False"
+                            StrokeThickness="0"
+                            StrokeShape="RoundRectangle 5">
                         <HorizontalStackLayout>
                             <VerticalStackLayout HorizontalOptions="FillAndExpand">
-                                <Label x:Name="SavedDeviceName" Text="" FontSize="14" />
-                                <Label x:Name="SavedDeviceMac" Text="" FontSize="12" TextColor="Gray" />
+                                <Label x:Name="SavedDeviceName"
+                                        Text=""
+                                        FontSize="14"/>
+                                <Label x:Name="SavedDeviceMac"
+                                        Text=""
+                                        FontSize="12"
+                                        TextColor="Gray"/>
                             </VerticalStackLayout>
                             <Button
                                 Text="删除"
                                 Clicked="DeleteButton_Clicked"
-                                BackgroundColor="#FF5252" />
+                                BackgroundColor="#FF5252"
+                                HorizontalOptions="End"
+                                VerticalOptions="Center"
+                                Padding="20,8"/>
                         </HorizontalStackLayout>
                     </Border>
 
                     <!-- 扫描进度 -->
-                    <ActivityIndicator x:Name="ScanningIndicator" IsRunning="False" IsVisible="False" />
+                    <ActivityIndicator x:Name="ScanningIndicator"
+                            IsRunning="False"
+                            IsVisible="False"/>
                 </VerticalStackLayout>
             </Border>
         </VerticalStackLayout>

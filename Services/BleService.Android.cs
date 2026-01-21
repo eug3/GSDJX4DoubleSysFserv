@@ -58,43 +58,88 @@ public class BleServiceAndroid : IBleService
         Disconnect();
     }
 
+    private TaskCompletionSource<bool>? _connectTcs;
+
     public async Task<bool> ConnectAsync(string deviceId, string macAddress)
     {
         try
         {
-            if (_adapter == null) return false;
+            if (_adapter == null)
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: 适配器未初始化");
+                return false;
+            }
 
             // 优先使用已发现的设备
             BluetoothDevice? device = null;
             if (_discoveredDevices.TryGetValue(deviceId, out var discovered))
             {
                 device = discovered;
+                System.Diagnostics.Debug.WriteLine($"BLE: 使用已发现的设备 - {device.Name}");
             }
             else
             {
                 device = _adapter.GetRemoteDevice(macAddress);
+                System.Diagnostics.Debug.WriteLine($"BLE: 使用 MAC 地址创建设备 - {macAddress}");
             }
             
-            if (device == null) return false;
+            if (device == null)
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: 设备为空");
+                return false;
+            }
 
             _connectedDevice = device;
+            _connectTcs = new TaskCompletionSource<bool>();
             
-            // 使用 autoConnect=true 支持后台自动重连
+            System.Diagnostics.Debug.WriteLine($"BLE: 开始连接到 {device.Name ?? macAddress}...");
+            
+            // 使用 autoConnect=false 立即连接，不等待后台
             _gatt = device.ConnectGatt(
                 Android.App.Application.Context, 
-                true,  // autoConnect: 后台自动重连
+                false,  // autoConnect: false 立即连接
                 _gattCallback,
                 BluetoothTransports.Le
             );
 
-            await SaveMacAddress(macAddress);
-            System.Diagnostics.Debug.WriteLine($"BLE: 正在连接到 {device.Name} ({macAddress})");
+            if (_gatt == null)
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: ConnectGatt 返回 null");
+                return false;
+            }
 
-            return true;
+            // 等待连接结果，最多 15 秒
+            var timeoutTask = Task.Delay(15000);
+            var completedTask = await Task.WhenAny(_connectTcs.Task, timeoutTask);
+            
+            if (completedTask == timeoutTask)
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: 连接超时");
+                _gatt?.Disconnect();
+                _gatt?.Close();
+                _gatt = null;
+                return false;
+            }
+
+            var result = await _connectTcs.Task;
+            if (result)
+            {
+                await SaveMacAddress(macAddress);
+                System.Diagnostics.Debug.WriteLine($"BLE: 连接成功 - {ConnectedDeviceName}");
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: 连接失败");
+            }
+            
+            return result;
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"BLE: 连接错误 - {ex.Message}");
+            _gatt?.Disconnect();
+            _gatt?.Close();
+            _gatt = null;
             return false;
         }
     }
@@ -113,10 +158,22 @@ public class BleServiceAndroid : IBleService
 
     public async Task<ObservableCollection<BleDeviceInfo>> ScanDevicesAsync()
     {
-        if (_adapter == null || !_adapter.IsEnabled || _scanner == null)
+        if (_adapter == null)
         {
-            System.Diagnostics.Debug.WriteLine($"BLE: 蓝牙不可用，状态: {_adapter?.IsEnabled}");
-            return new ObservableCollection<BleDeviceInfo>();
+            System.Diagnostics.Debug.WriteLine("BLE: BluetoothAdapter 未初始化");
+            throw new InvalidOperationException("蓝牙适配器未初始化，请检查设备是否支持蓝牙");
+        }
+
+        if (!_adapter.IsEnabled)
+        {
+            System.Diagnostics.Debug.WriteLine("BLE: 蓝牙未启用");
+            throw new InvalidOperationException("蓝牙未启用，请先开启蓝牙");
+        }
+
+        if (_scanner == null)
+        {
+            System.Diagnostics.Debug.WriteLine("BLE: BluetoothLeScanner 未初始化");
+            throw new InvalidOperationException("蓝牙扫描器不可用");
         }
 
         _scannedDevices = new ObservableCollection<BleDeviceInfo>();
@@ -128,15 +185,31 @@ public class BleServiceAndroid : IBleService
             .SetScanMode(Android.Bluetooth.LE.ScanMode.LowLatency)
             .Build();
 
-        System.Diagnostics.Debug.WriteLine("BLE: 开始扫描...");
-        _scanner.StartScan(null, settings, scanCallback);
+        System.Diagnostics.Debug.WriteLine("BLE: 开始扫描... (低延迟模式，扫描时长 8 秒)");
+        
+        try
+        {
+            _scanner.StartScan(null, settings, scanCallback);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"BLE: 启动扫描失败 - {ex.Message}");
+            throw new InvalidOperationException($"启动蓝牙扫描失败: {ex.Message}。可能缺少权限或蓝牙状态异常", ex);
+        }
 
-        // 扫描 5 秒后停止
+        // 扫描 8 秒后停止
         _ = Task.Run(async () =>
         {
-            await Task.Delay(5000);
-            _scanner?.StopScan(scanCallback);
-            System.Diagnostics.Debug.WriteLine($"BLE: 扫描结束，发现 {_scannedDevices?.Count ?? 0} 个设备");
+            await Task.Delay(8000);
+            try
+            {
+                _scanner?.StopScan(scanCallback);
+                System.Diagnostics.Debug.WriteLine($"BLE: 扫描结束，发现 {_scannedDevices?.Count ?? 0} 个设备");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"BLE: 停止扫描时出错 - {ex.Message}");
+            }
             _scanTcs?.TrySetResult(_scannedDevices ?? new ObservableCollection<BleDeviceInfo>());
         });
 
@@ -148,11 +221,22 @@ public class BleServiceAndroid : IBleService
         var deviceId = device.Address ?? "";
         var deviceName = device.Name;
 
-        // 过滤掉没有名字的设备
-        if (string.IsNullOrWhiteSpace(deviceName) || string.IsNullOrEmpty(deviceId))
+        // 过滤条件：
+        // 1. 必须有地址
+        // 2. 有名字或者信号强度较强（可能是 ESP32 但名字未广播）
+        if (string.IsNullOrEmpty(deviceId))
         {
             return;
         }
+
+        // 过滤掉没有名字的设备（只显示有蓝牙名称的设备）
+        if (string.IsNullOrWhiteSpace(deviceName))
+        {
+            System.Diagnostics.Debug.WriteLine($"BLE: 跳过无名设备 - ({deviceId}) RSSI: {rssi}");
+            return;
+        }
+
+        System.Diagnostics.Debug.WriteLine($"BLE: 发现设备 - {deviceName} ({deviceId}) RSSI: {rssi}");
 
         if (!_discoveredDevices.ContainsKey(deviceId))
         {
@@ -168,7 +252,6 @@ public class BleServiceAndroid : IBleService
             MainThread.BeginInvokeOnMainThread(() =>
             {
                 _scannedDevices?.Add(deviceInfo);
-                System.Diagnostics.Debug.WriteLine($"BLE: 发现设备 - {deviceName} ({deviceId})");
             });
         }
     }
@@ -184,25 +267,38 @@ public class BleServiceAndroid : IBleService
             _shouldAutoReconnect = true;
             System.Diagnostics.Debug.WriteLine($"BLE: 已连接到 {ConnectedDeviceName}");
             
+            // 通知连接成功
+            _connectTcs?.TrySetResult(true);
+            
             // 发现服务
             gatt?.DiscoverServices();
         }
         else if (newState == ProfileState.Disconnected)
         {
+            var wasConnected = IsConnected;
             IsConnected = false;
             ConnectedDeviceName = null;
             System.Diagnostics.Debug.WriteLine("BLE: 连接已断开");
 
-            // 后台自动重连
-            if (_shouldAutoReconnect && _connectedDevice != null)
+            // 如果是连接过程中断开，通知连接失败
+            if (_connectTcs != null && !_connectTcs.Task.IsCompleted)
+            {
+                _connectTcs.TrySetResult(false);
+            }
+
+            // 后台自动重连（仅当之前已连接时）
+            if (_shouldAutoReconnect && wasConnected && _connectedDevice != null)
             {
                 System.Diagnostics.Debug.WriteLine("BLE: 尝试自动重连...");
-                _gatt = _connectedDevice.ConnectGatt(
-                    Android.App.Application.Context,
-                    true,
-                    _gattCallback,
-                    BluetoothTransports.Le
-                );
+                Task.Delay(1000).ContinueWith(_ =>
+                {
+                    _gatt = _connectedDevice.ConnectGatt(
+                        Android.App.Application.Context,
+                        true,  // autoConnect: 后台自动重连
+                        _gattCallback,
+                        BluetoothTransports.Le
+                    );
+                });
             }
         }
     }
@@ -216,6 +312,54 @@ public class BleServiceAndroid : IBleService
             {
                 System.Diagnostics.Debug.WriteLine($"BLE: 发现服务 - {service.Uuid}");
             }
+        }
+    }
+
+    /// <summary>
+    /// 启动时尝试自动连接已保存的设备
+    /// </summary>
+    public async Task TryAutoConnectOnStartupAsync()
+    {
+        try
+        {
+            var macAddress = await GetSavedMacAddress();
+            if (!string.IsNullOrEmpty(macAddress))
+            {
+                System.Diagnostics.Debug.WriteLine($"BLE: 启动时尝试自动连接到 {macAddress}");
+                await ConnectAsync(macAddress, macAddress);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"BLE: 启动时自动连接失败 - {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 发送文本到设备（X4IM v2 协议）
+    /// </summary>
+    /// <param name="text">文本内容</param>
+    /// <param name="chapter">章节号</param>
+    /// <returns>是否发送成功</returns>
+    public async Task<bool> SendTextToDeviceAsync(string text, int chapter = 0)
+    {
+        try
+        {
+            if (!IsConnected || _gatt == null)
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: 设备未连接");
+                return false;
+            }
+
+            // TODO: 实现 X4IM v2 协议的文本发送
+            // 这里需要根据协议将文本转换为位图并分片传输
+            System.Diagnostics.Debug.WriteLine($"BLE: 发送文本到设备 - 章节: {chapter}, 长度: {text.Length}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"BLE: 发送文本失败 - {ex.Message}");
+            return false;
         }
     }
 

@@ -25,4 +25,17 @@ public interface IBleService
     Task<string?> GetSavedMacAddress();
     Task SaveMacAddress(string macAddress);
     Task DeleteSavedMacAddress();
+
+    /// <summary>
+    /// 启动时尝试自动连接已保存的设备
+    /// </summary>
+    Task TryAutoConnectOnStartupAsync();
+
+    /// <summary>
+    /// 发送文本到设备（X4IM v2 协议）
+    /// </summary>
+    /// <param name="text">文本内容</param>
+    /// <param name="chapter">章节号</param>
+    /// <returns>是否发送成功</returns>
+    Task<bool> SendTextToDeviceAsync(string text, int chapter = 0);
 }

@@ -9,6 +9,8 @@ namespace GSDJX4DoubleSysFserv.Views;
 public partial class WeReadPage : ContentPage
 {
     private readonly IBleService _bleService;
+    private string _currentUrl = string.Empty;
+    private string _currentCookie = string.Empty;
 
     // 正则匹配阅读器 URL: https://weread.qq.com/web/reader/xxx
     private static readonly Regex ReaderUrlRegex = new Regex(
@@ -31,8 +33,26 @@ public partial class WeReadPage : ContentPage
 
     private void WebView_Navigated(object? sender, WebNavigatedEventArgs e)
     {
+        _currentUrl = e.Url ?? string.Empty;
         CheckFloatingButtonVisibility(e.Url);
         CheckLoginButtonVisibility(e.Url);
+
+        // 获取 Cookie
+        _ = GetCookieAsync();
+    }
+
+    private async Task GetCookieAsync()
+    {
+        try
+        {
+            var cookie = await WebView.EvaluateJavaScriptAsync("document.cookie");
+            _currentCookie = cookie ?? string.Empty;
+            System.Diagnostics.Debug.WriteLine($"WeRead: 获取到 Cookie (长度: {_currentCookie.Length})");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"WeRead: 获取 Cookie 失败 - {ex.Message}");
+        }
     }
 
     private void CheckFloatingButtonVisibility(string? url)
@@ -54,9 +74,16 @@ public partial class WeReadPage : ContentPage
         System.Diagnostics.Debug.WriteLine($"URL: {url}, IsReaderPage: {isReaderPage}, IsBleConnected: {isBleConnected}, ButtonVisible: {FloatingButton.IsVisible}");
     }
 
-    private void FloatingButton_Clicked(object? sender, EventArgs e)
+    private async void FloatingButton_Clicked(object? sender, EventArgs e)
     {
-        // 浮动按钮点击事件 - 用户说后续再实现
+        // 确保有最新的 Cookie
+        await GetCookieAsync();
+
+        // 跳转到 EPD 阅读页面，传递 URL 和 Cookie
+        var encodedUrl = Uri.EscapeDataString(_currentUrl);
+        var encodedCookie = Uri.EscapeDataString(_currentCookie);
+
+        await Shell.Current.GoToAsync($"EPDReadingPage?url={encodedUrl}&cookie={encodedCookie}");
     }
 
     private async void CheckLoginButtonVisibility(string? url)

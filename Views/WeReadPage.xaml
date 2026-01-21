@@ -14,7 +14,7 @@
         <!-- 左侧浮动按钮 - 仅在阅读页且蓝牙已连接时显示 -->
         <Button
             x:Name="FloatingButton"
-            Text="📖"
+            Text="EPD阅读"
             FontSize="24"
             WidthRequest="50"
             HeightRequest="50"

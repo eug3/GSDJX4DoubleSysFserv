@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="GSDJX4DoubleSysFserv.Views.EPDReadingPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    Title="EPD 阅读"
+    BackgroundColor="#1a1a2e">
+
+    <Grid RowDefinitions="Auto,*,Auto" Padding="15">
+        
+        <!-- 顶部状态栏 -->
+        <Frame Grid.Row="0" 
+               BackgroundColor="#0f3460" 
+               CornerRadius="8" 
+               Padding="10"
+               Margin="0,0,0,10">
+            <StackLayout Spacing="5">
+                <Label x:Name="ConnectionStatusLabel"
+                       Text="蓝牙状态: 未连接"
+                       TextColor="#888888"
+                       FontSize="12" />
+                <Label x:Name="PageInfoLabel"
+                       Text="页码: 0 | 字符: 0"
+                       TextColor="#00d9ff"
+                       FontSize="14"
+                       FontAttributes="Bold" />
+                <Label x:Name="StatusLabel"
+                       Text="等待操作"
+                       TextColor="#00ff88"
+                       FontSize="12" />
+            </StackLayout>
+        </Frame>
+
+        <!-- 文本内容显示区域 -->
+        <Frame Grid.Row="1" 
+               BackgroundColor="#0f3460" 
+               CornerRadius="8"
+               Padding="0">
+            <Editor x:Name="ContentEditor"
+                    BackgroundColor="#0f3460"
+                    TextColor="#ffffff"
+                    FontFamily="Courier New"
+                    FontSize="14"
+                    IsReadOnly="True"
+                    Placeholder="文本内容将在这里显示...&#10;&#10;点击「获取当前页」开始阅读" />
+        </Frame>
+
+        <!-- 底部控制按钮 -->
+        <StackLayout Grid.Row="2" 
+                     Spacing="10" 
+                     Margin="0,10,0,0">
+            
+            <!-- 翻页控制 -->
+            <Grid ColumnDefinitions="*,*,*" ColumnSpacing="10">
+                <Button Grid.Column="0"
+                        x:Name="PrevChapterBtn"
+                        Text="⬅️ 上一章"
+                        BackgroundColor="#16213e"
+                        TextColor="#ffffff"
+                        CornerRadius="5"
+                        Clicked="OnPrevChapter" />
+                <Button Grid.Column="1"
+                        x:Name="CurrentPageBtn"
+                        Text="📖 获取当前页"
+                        BackgroundColor="#07C160"
+                        TextColor="#ffffff"
+                        CornerRadius="5"
+                        Clicked="OnGetCurrentPage" />
+                <Button Grid.Column="2"
+                        x:Name="NextChapterBtn"
+                        Text="➡️ 下一章"
+                        BackgroundColor="#16213e"
+                        TextColor="#ffffff"
+                        CornerRadius="5"
+                        Clicked="OnNextChapter" />
+            </Grid>
+
+            <!-- 发送到设备按钮 -->
+            <Button x:Name="SendToDeviceBtn"
+                    Text="📤 发送到 EPD 设备"
+                    BackgroundColor="#00d9ff"
+                    TextColor="#000000"
+                    FontAttributes="Bold"
+                    CornerRadius="5"
+                    HeightRequest="50"
+                    Clicked="OnSendToDevice" />
+
+            <!-- 加载指示器 -->
+            <ActivityIndicator x:Name="LoadingIndicator"
+                               IsRunning="False"
+                               IsVisible="False"
+                               Color="#00d9ff"
+                               HeightRequest="40" />
+        </StackLayout>
+    </Grid>
+</ContentPage>
