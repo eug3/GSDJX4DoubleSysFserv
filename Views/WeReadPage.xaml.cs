@@ -32,6 +32,7 @@ public partial class WeReadPage : ContentPage
     private void WebView_Navigated(object? sender, WebNavigatedEventArgs e)
     {
         CheckFloatingButtonVisibility(e.Url);
+        CheckLoginButtonVisibility(e.Url);
     }
 
     private void CheckFloatingButtonVisibility(string? url)
@@ -56,6 +57,134 @@ public partial class WeReadPage : ContentPage
     private void FloatingButton_Clicked(object? sender, EventArgs e)
     {
         // 浮动按钮点击事件 - 用户说后续再实现
+    }
+
+    private async void CheckLoginButtonVisibility(string? url)
+    {
+        if (string.IsNullOrEmpty(url))
+        {
+            LoginButton.IsVisible = false;
+            return;
+        }
+
+        // 检查是否是微信读书首页
+        bool isHomePage = url == "https://weread.qq.com" || url == "https://weread.qq.com/";
+
+        if (!isHomePage)
+        {
+            LoginButton.IsVisible = false;
+            return;
+        }
+
+        // 在首页时，检测页面上是否有"登录"按钮
+        try
+        {
+            var result = await WebView.EvaluateJavaScriptAsync("""
+                (function() {
+                    var candidates = document.querySelectorAll('a.wr_index_page_top_section_header_action_link');
+                    for (var i = 0; i < candidates.length; i++) {
+                        if (candidates[i].innerText.indexOf('登录') !== -1) {
+                            return 'has_login';
+                        }
+                    }
+
+                    var anchors = document.getElementsByTagName('a');
+                    for (var j = 0; j < anchors.length; j++) {
+                        if (anchors[j].innerText.indexOf('登录') !== -1) {
+                            return 'has_login';
+                        }
+                    }
+
+                    return 'no_login';
+                })();
+            """);
+
+            // 如果页面上有"登录"按钮，显示浮动登录按钮；否则不显示
+            LoginButton.IsVisible = result == "has_login";
+        }
+        catch
+        {
+            // 出错时默认不显示登录按钮
+            LoginButton.IsVisible = false;
+        }
+    }
+
+    private async void LoginButton_Clicked(object? sender, EventArgs e)
+    {
+        // 执行登录点击操作
+        await PerformLoginClick();
+    }
+
+    private async Task PerformLoginClick()
+    {
+        try
+        {
+            await WebView.EvaluateJavaScriptAsync("""
+                (function() {
+                    if (window.__weReadLoginDetectionStarted) {
+                        console.log('登录检测已启动，跳过重复执行');
+                        return;
+                    }
+                    window.__weReadLoginDetectionStarted = true;
+
+                    console.log('开始检测登录按钮...');
+                    var count = 0;
+                    var timer = setInterval(function() {
+                        count++;
+
+                        // 先检查是否已经登录（检测退出登录按钮）
+                        var logoutLink = document.querySelector('.wr_index_page_top_section_header_action_avatar_dropdown_item_lang');
+                        if (logoutLink && logoutLink.innerText.indexOf('退出登录') !== -1) {
+                            console.log('已检测到退出登录，用户已登录');
+                            clearInterval(timer);
+                            return;
+                        }
+
+                        if (window.__weReadLoginClicked) {
+                            clearInterval(timer);
+                            return;
+                        }
+
+                        var loginLink = null;
+                        var candidates = document.querySelectorAll('a.wr_index_page_top_section_header_action_link');
+                        for (var i = 0; i < candidates.length; i++) {
+                            if (candidates[i].innerText.indexOf('登录') !== -1) {
+                                loginLink = candidates[i];
+                                break;
+                            }
+                        }
+
+                        if (!loginLink) {
+                            var anchors = document.getElementsByTagName('a');
+                            for (var j = 0; j < anchors.length; j++) {
+                                if (anchors[j].innerText.indexOf('登录') !== -1) {
+                                    loginLink = anchors[j];
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (loginLink) {
+                            console.log('执行点击: ' + loginLink.innerText);
+                            window.__weReadLoginClicked = true;
+
+                            // 只调用一次 click，不派发额外的事件
+                            loginLink.click();
+
+                            clearInterval(timer);
+                        }
+
+                        if (count > 30) {
+                            clearInterval(timer);
+                        }
+                    }, 500);
+                })();
+            """);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"PerformLoginClick error: {ex.Message}");
+        }
     }
 }
 

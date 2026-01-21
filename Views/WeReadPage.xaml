@@ -30,5 +30,25 @@
                 <Shadow Brush="Black" Offset="5,5" Radius="5" />
             </Button.Shadow>
         </Button>
+
+        <!-- 登录按钮 - 仅在微信读书首页显示 -->
+        <Button
+            x:Name="LoginButton"
+            Text="点击登录"
+            FontSize="16"
+            WidthRequest="100"
+            HeightRequest="40"
+            CornerRadius="20"
+            BackgroundColor="#07C160"
+            TextColor="White"
+            HorizontalOptions="Center"
+            VerticalOptions="End"
+            Margin="0,0,0,50"
+            IsVisible="False"
+            Clicked="LoginButton_Clicked">
+            <Button.Shadow>
+                <Shadow Brush="Black" Offset="3,3" Radius="3" />
+            </Button.Shadow>
+        </Button>
     </Grid>
 </ContentPage>

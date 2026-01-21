@@ -19,10 +19,7 @@
                 <DataTemplate>
                     <Frame Margin="0,0,0,8" Padding="12" BorderColor="{StaticResource Gray300}" CornerRadius="8">
                         <Grid ColumnDefinitions="*,Auto">
-                            <VerticalStackLayout Grid.Column="0">
-                                <Label Text="{Binding Name}" FontSize="16" FontAttributes="Bold" />
-                                <Label Text="{Binding MacAddress}" FontSize="12" TextColor="{StaticResource Gray600}" />
-                            </VerticalStackLayout>
+                            <Label Grid.Column="0" Text="{Binding Name}" FontSize="16" FontAttributes="Bold" VerticalOptions="Center" />
                             <Label Grid.Column="1" Text="›" FontSize="24" TextColor="{StaticResource Primary}" VerticalOptions="Center" />
                         </Grid>
                     </Frame>
