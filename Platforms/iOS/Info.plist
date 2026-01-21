@@ -28,11 +28,23 @@
 	</array>
 	<key>XSAppIconAssets</key>
 	<string>Assets.xcassets/appicon.appiconset</string>
+	
 	<!-- 蓝牙权限 - iOS 13+ -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>需要蓝牙连接以与外部设备通信</string>
+	<string>App 需要使用蓝牙与电子墨水屏设备通信</string>
+	
 	<!-- 蓝牙权限 - iOS 12 及之前版本 (兼容性) -->
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>需要蓝牙连接以与外部设备通信</string>
+	<string>App 需要访问蓝牙以连接电子墨水屏外设</string>
+	
+	<!-- BLE 扫描需要定位权限 -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>App 需要在使用期间访问定位以扫描蓝牙设备</string>
+	
+	<!-- 后台蓝牙模式 -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
 </dict>
 </plist>

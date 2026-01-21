@@ -31,6 +31,7 @@ public static class MauiProgram
         // 注册页面
         builder.Services.AddTransient<Views.WeReadPage>();
         builder.Services.AddTransient<Views.SettingsPage>();
+         builder.Services.AddTransient<Views.BleDevicesPage>();
 
 #if DEBUG
         builder.Logging.AddDebug();

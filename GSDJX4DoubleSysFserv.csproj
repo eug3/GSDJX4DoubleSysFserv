@@ -22,11 +22,19 @@
 		<ApplicationTitle>GSDJX4DoubleSysFserv</ApplicationTitle>
 
 		<!-- App Identifier -->
-		<ApplicationId>com.companyname.gsdjx4doublesysfserv</ApplicationId>
+		<ApplicationId>com.guaishoudejia.gsdjx4doublesysfserv</ApplicationId>
 
 		<!-- Versions -->
 		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
 		<ApplicationVersion>1</ApplicationVersion>
+
+		<!-- iOS Signing -->
+		<CodesignKey>Apple Development: JUN YIN (AHDEY625MZ)</CodesignKey>
+		<CodesignProvision>Automatic:AdHoc</CodesignProvision>
+		<IPhoneResourcePrefix>Resources</IPhoneResourcePrefix>
+		<!-- 启用自动签名 -->
+		<MtouchAutomaticSigning>true</MtouchAutomaticSigning>
+		<DevelopmentTeam>CZAMASLCUC</DevelopmentTeam>
 
 		<!-- To develop, package, and publish an app to the Microsoft Store, see: https://aka.ms/MauiTemplateUnpackaged -->
 		<WindowsPackageType>None</WindowsPackageType>
@@ -36,6 +44,28 @@
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">21.0</SupportedOSPlatformVersion>
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</SupportedOSPlatformVersion>
 		<TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
+		
+		<!-- Debug configuration for iOS device deployment -->
+		<DebugSymbols Condition="'$(Configuration)' == 'Debug' and '$(TargetFramework)' == 'net10.0-ios'">true</DebugSymbols>
+		<EnableCodeSigning Condition="'$(TargetFramework)' == 'net10.0-ios'">true</EnableCodeSigning>
+	</PropertyGroup>
+
+	<!-- iOS 真机调试配置 -->
+	<PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-ios' and '$(RuntimeIdentifier)' == 'ios-arm64'">
+		<CodesignEntitlements>Platforms/iOS/Entitlements.plist</CodesignEntitlements>
+		<CodesignKey>Apple Development: JUN YIN (AHDEY625MZ)</CodesignKey>
+		<CodesignProvision>Automatic</CodesignProvision>
+		<MtouchUseLlvm>true</MtouchUseLlvm>
+		<MtouchDebug>true</MtouchDebug>
+		<IPhoneResourcePrefix>Resources</IPhoneResourcePrefix>
+		<RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
+	</PropertyGroup>
+
+	<!-- iOS Simulator 配置 - 禁用代码签名 -->
+	<PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-ios' and '$(RuntimeIdentifier)' == 'iossimulator-arm64'">
+		<CodesignKey></CodesignKey>
+		<CodesignProvision></CodesignProvision>
+		<CodesignEntitlements></CodesignEntitlements>
 	</PropertyGroup>
 
 	<ItemGroup>

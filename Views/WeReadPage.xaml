@@ -25,7 +25,10 @@
             VerticalOptions="Center"
             Margin="10,0,0,0"
             IsVisible="False"
-            Clicked="FloatingButton_Clicked"
-            Shadow="{Shadow Brush=Black, Offset=5,5}" />
+            Clicked="FloatingButton_Clicked">
+            <Button.Shadow>
+                <Shadow Brush="Black" Offset="5,5" Radius="5" />
+            </Button.Shadow>
+        </Button>
     </Grid>
 </ContentPage>

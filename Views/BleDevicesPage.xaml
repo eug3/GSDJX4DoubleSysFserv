@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="GSDJX4DoubleSysFserv.Views.BleDevicesPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    Title="蓝牙设备扫描">
+
+    <Grid RowDefinitions="Auto,*,Auto" Padding="16">
+        
+        <!-- 扫描状态 -->
+        <HorizontalStackLayout Grid.Row="0" Spacing="10" Margin="0,0,0,16">
+            <ActivityIndicator x:Name="ScanningIndicator" IsRunning="False" Color="{StaticResource Primary}" />
+            <Label x:Name="StatusLabel" Text="点击扫描按钮开始查找设备" VerticalOptions="Center" />
+        </HorizontalStackLayout>
+
+        <!-- 设备列表 -->
+        <CollectionView x:Name="DevicesCollectionView" Grid.Row="1" SelectionMode="Single" SelectionChanged="DevicesCollectionView_SelectionChanged">
+            <CollectionView.ItemTemplate>
+                <DataTemplate>
+                    <Frame Margin="0,0,0,8" Padding="12" BorderColor="{StaticResource Gray300}" CornerRadius="8">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <VerticalStackLayout Grid.Column="0">
+                                <Label Text="{Binding Name}" FontSize="16" FontAttributes="Bold" />
+                                <Label Text="{Binding MacAddress}" FontSize="12" TextColor="{StaticResource Gray600}" />
+                            </VerticalStackLayout>
+                            <Label Grid.Column="1" Text="›" FontSize="24" TextColor="{StaticResource Primary}" VerticalOptions="Center" />
+                        </Grid>
+                    </Frame>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+            <CollectionView.EmptyView>
+                <VerticalStackLayout HorizontalOptions="Center" VerticalOptions="Center">
+                    <Label Text="📡" FontSize="48" HorizontalOptions="Center" />
+                    <Label Text="未发现设备" FontSize="16" TextColor="{StaticResource Gray600}" HorizontalOptions="Center" Margin="0,8,0,0" />
+                </VerticalStackLayout>
+            </CollectionView.EmptyView>
+        </CollectionView>
+
+        <!-- 操作按钮 -->
+        <Grid Grid.Row="2" ColumnDefinitions="*,*" ColumnSpacing="12" Margin="0,16,0,0">
+            <Button Grid.Column="0" Text="开始扫描" Clicked="ScanButton_Clicked" />
+            <Button Grid.Column="1" Text="取消" Clicked="CancelButton_Clicked" BackgroundColor="{StaticResource Gray300}" TextColor="{StaticResource Gray900}" />
+        </Grid>
+        
+    </Grid>
+</ContentPage>
