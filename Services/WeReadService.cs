@@ -100,7 +100,7 @@ public class WeReadService : IWeReadService
 
     private const string StateKey = "WeRead_State";
 
-    public string ServerUrl { get; set; } = "http://home.onino.xyz:8008";
+    public string ServerUrl { get; set; } = "https://weread.guaishoudejia.com";
     public WeReadState State { get; private set; } = new();
 
     public WeReadService(IStorageService storageService)
