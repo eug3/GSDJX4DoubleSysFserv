@@ -318,26 +318,94 @@ public class ShinyBleService : IBleService
 
             _logger.LogInformation($"BLE: 发现 {allCharacteristics.Count} 个特征值");
 
+            // 排除标准服务（0x1800/0x1801），避免误选 0x2B29 等系统特征
+            static bool IsStandardBase(string uuid)
+                => uuid.EndsWith("-0000-1000-8000-00805f9b34fb", StringComparison.OrdinalIgnoreCase);
+
+            static bool IsExcludedService(string uuid)
+            {
+                var u = uuid.ToLowerInvariant();
+                return u == "00001800-0000-1000-8000-00805f9b34fb" // Generic Access
+                    || u == "00001801-0000-1000-8000-00805f9b34fb"; // Generic Attribute
+            }
+
+            var knownServicePref = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                // Nordic UART Service
+                "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
+                // 常见透传服务
+                "0000ffe0-0000-1000-8000-00805f9b34fb",
+                "0000abf0-0000-1000-8000-00805f9b34fb",
+                // ESP-IDF 示例服务
+                "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+            };
+
+            var knownCharPref = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                // NUS Write 特征
+                "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+                // FFE1 常作透传特征
+                "0000ffe1-0000-1000-8000-00805f9b34fb",
+                // ESP-IDF 示例特征
+                "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+            };
+
+            // 计算候选评分并选择最佳
+            var candidates = new List<(BleCharacteristicInfo ch, int score)>();
             foreach (var ch in allCharacteristics)
             {
                 var props = ch.Properties;
                 var canWrite = props.HasFlag(CharacteristicProperties.Write) || props.HasFlag(CharacteristicProperties.WriteWithoutResponse);
-
                 _logger.LogDebug($"BLE: 特征 {ch.Uuid} @ 服务 {ch.Service.Uuid} Props={props}");
+                if (!canWrite)
+                    continue;
 
-                if (canWrite)
+                if (IsExcludedService(ch.Service.Uuid))
                 {
-                    _writeServiceUuid = ch.Service.Uuid;
-                    _writeCharacteristicUuid = ch.Uuid;
-                    _logger.LogInformation("BLE: ✅ 找到可写特征值!");
-                    _logger.LogInformation($"BLE:    服务: {_writeServiceUuid}");
-                    _logger.LogInformation($"BLE:    特征值: {_writeCharacteristicUuid}");
-                    _logger.LogInformation($"BLE:    属性: {props}");
-                    return;
+                    // 丢弃 GA/GAtt 服务下的写特征（如 0x2B29）
+                    _logger.LogDebug($"BLE: 排除系统服务可写特征 {ch.Uuid} @ {ch.Service.Uuid}");
+                    continue;
                 }
+
+                var score = 0;
+                // 首选 Write Without Response（常见串口透传表现更稳定）
+                if (props.HasFlag(CharacteristicProperties.WriteWithoutResponse)) score += 120;
+                if (props.HasFlag(CharacteristicProperties.Write)) score += 80;
+
+                // 自定义 128-bit UUID 优先
+                if (!IsStandardBase(ch.Service.Uuid)) score += 60;
+                if (!IsStandardBase(ch.Uuid)) score += 20;
+
+                // 已知服务/特征额外加分
+                if (knownServicePref.Contains(ch.Service.Uuid)) score += 100;
+                if (knownCharPref.Contains(ch.Uuid)) score += 100;
+
+                // 避免选择 0x2Bxx 类系统特征
+                var chLower = ch.Uuid.ToLowerInvariant();
+                if (chLower.StartsWith("00002b") && IsStandardBase(ch.Uuid)) score -= 200;
+
+                candidates.Add((ch, score));
             }
 
-            _logger.LogWarning("BLE: 未找到任何可写特征值!");
+            if (candidates.Count == 0)
+            {
+                _logger.LogWarning("BLE: 未找到任何可写特征值!");
+                return;
+            }
+
+            // 调试输出候选排序
+            foreach (var c in candidates.OrderByDescending(x => x.score))
+            {
+                _logger.LogInformation($"BLE: 候选写特征 score={c.score} svc={c.ch.Service.Uuid} ch={c.ch.Uuid} props={c.ch.Properties}");
+            }
+
+            var best = candidates.OrderByDescending(x => x.score).First().ch;
+            _writeServiceUuid = best.Service.Uuid;
+            _writeCharacteristicUuid = best.Uuid;
+            _logger.LogInformation("BLE: ✅ 选定写特征值");
+            _logger.LogInformation($"BLE:    服务: {_writeServiceUuid}");
+            _logger.LogInformation($"BLE:    特征值: {_writeCharacteristicUuid}");
+            _logger.LogInformation($"BLE:    属性: {best.Properties}");
         }
         catch (Exception ex)
         {
