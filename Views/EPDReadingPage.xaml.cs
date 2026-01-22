@@ -43,6 +43,9 @@ public partial class EPDReadingPage : ContentPage
 
         // 页面加载时更新状态
         Loaded += OnPageLoaded;
+        
+        // 订阅按键事件
+        _bleService.ButtonPressed += OnButtonPressed;
     }
 
     private void OnPageLoaded(object? sender, EventArgs e)
@@ -102,7 +105,7 @@ public partial class EPDReadingPage : ContentPage
     {
         if (string.IsNullOrEmpty(_bookUrl))
         {
-            await DisplayAlert("错误", "未获取到书籍 URL，请从微信读书页面进入", "确定");
+            await DisplayAlertAsync("错误", "未获取到书籍 URL，请从微信读书页面进入", "确定");
             return;
         }
 
@@ -115,11 +118,14 @@ public partial class EPDReadingPage : ContentPage
             ContentEditor.Text = content;
             UpdatePageInfo();
             SetStatus($"获取成功，共 {content.Length} 字符");
+            
+            // 自动发送到设备
+            await AutoSendToDeviceAsync(content);
         }
         catch (Exception ex)
         {
             SetStatus($"获取失败: {ex.Message}", true);
-            await DisplayAlert("错误", $"获取内容失败: {ex.Message}", "确定");
+            await DisplayAlertAsync("错误", $"获取内容失败: {ex.Message}", "确定");
         }
         finally
         {
@@ -131,7 +137,7 @@ public partial class EPDReadingPage : ContentPage
     {
         if (string.IsNullOrEmpty(_weReadService.State.CurrentUrl))
         {
-            await DisplayAlert("提示", "请先获取当前页内容", "确定");
+            await DisplayAlertAsync("提示", "请先获取当前页内容", "确定");
             return;
         }
 
@@ -144,6 +150,9 @@ public partial class EPDReadingPage : ContentPage
             ContentEditor.Text = content;
             UpdatePageInfo();
             SetStatus($"上一章获取成功，共 {content.Length} 字符");
+            
+            // 自动发送到设备
+            await AutoSendToDeviceAsync(content);
         }
         catch (Exception ex)
         {
@@ -159,7 +168,7 @@ public partial class EPDReadingPage : ContentPage
     {
         if (string.IsNullOrEmpty(_weReadService.State.CurrentUrl))
         {
-            await DisplayAlert("提示", "请先获取当前页内容", "确定");
+            await DisplayAlertAsync("提示", "请先获取当前页内容", "确定");
             return;
         }
 
@@ -172,6 +181,9 @@ public partial class EPDReadingPage : ContentPage
             ContentEditor.Text = content;
             UpdatePageInfo();
             SetStatus($"下一章获取成功，共 {content.Length} 字符");
+            
+            // 自动发送到设备
+            await AutoSendToDeviceAsync(content);
         }
         catch (Exception ex)
         {
@@ -188,13 +200,13 @@ public partial class EPDReadingPage : ContentPage
         var content = ContentEditor.Text;
         if (string.IsNullOrEmpty(content))
         {
-            await DisplayAlert("提示", "没有内容可发送，请先获取章节内容", "确定");
+            await DisplayAlertAsync("提示", "没有内容可发送，请先获取章节内容", "确定");
             return;
         }
 
         if (!_bleService.IsConnected)
         {
-            await DisplayAlert("错误", "蓝牙未连接，请先连接设备", "确定");
+            await DisplayAlertAsync("错误", "蓝牙未连接，请先连接设备", "确定");
             return;
         }
 
@@ -220,6 +232,86 @@ public partial class EPDReadingPage : ContentPage
         finally
         {
             SetLoading(false);
+        }
+    }
+
+    /// <summary>
+    /// 自动发送内容到 EPD 设备（后台静默发送）
+    /// </summary>
+    private async Task AutoSendToDeviceAsync(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+        {
+            System.Diagnostics.Debug.WriteLine("自动发送: 内容为空，跳过");
+            return;
+        }
+
+        if (!_bleService.IsConnected)
+        {
+            System.Diagnostics.Debug.WriteLine("自动发送: 蓝牙未连接，跳过");
+            SetStatus("提示: 蓝牙未连接，无法自动发送到设备", true);
+            return;
+        }
+
+        SetStatus("正在自动发送到 EPD 设备...");
+
+        try
+        {
+            var success = await _bleService.SendTextToDeviceAsync(content, _weReadService.State.Page);
+            if (success)
+            {
+                SetStatus($"✅ 已自动发送到设备 ({content.Length} 字符)");
+            }
+            else
+            {
+                SetStatus("自动发送失败", true);
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"自动发送失败: {ex.Message}", true);
+            System.Diagnostics.Debug.WriteLine($"自动发送异常: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// 处理ESP32设备发送的按键事件（左、右、上、下）
+    /// </summary>
+    private async void OnButtonPressed(object? sender, ButtonEventArgs e)
+    {
+        System.Diagnostics.Debug.WriteLine($"📱 检测到设备按键: {e.Key}");
+
+        switch (e.Key.ToUpper())
+        {
+            case "LEFT":
+                System.Diagnostics.Debug.WriteLine("设备按键: LEFT - 执行上一章");
+                MainThread.BeginInvokeOnMainThread(() => OnPrevChapter(this, EventArgs.Empty));
+                break;
+
+            case "RIGHT":
+                System.Diagnostics.Debug.WriteLine("设备按键: RIGHT - 执行下一章");
+                MainThread.BeginInvokeOnMainThread(() => OnNextChapter(this, EventArgs.Empty));
+                break;
+
+            case "UP":
+                System.Diagnostics.Debug.WriteLine("设备按键: UP - 本地翻页");
+                SetStatus("设备按键: 向上翻页");
+                break;
+
+            case "DOWN":
+                System.Diagnostics.Debug.WriteLine("设备按键: DOWN - 本地翻页");
+                SetStatus("设备按键: 向下翻页");
+                break;
+
+            case "OK":
+            case "ENTER":
+                System.Diagnostics.Debug.WriteLine("设备按键: OK/ENTER - 刷新屏幕");
+                SetStatus("设备按键: 确认/刷新");
+                break;
+
+            default:
+                System.Diagnostics.Debug.WriteLine($"未知的设备按键: {e.Key}");
+                break;
         }
     }
 }

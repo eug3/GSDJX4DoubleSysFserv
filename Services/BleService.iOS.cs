@@ -20,6 +20,8 @@ public class BleServiceApple : IBleService
     private ObservableCollection<BleDeviceInfo>? _scannedDevices;
     private bool _shouldAutoReconnect = true;
 
+    public event EventHandler<ButtonEventArgs>? ButtonPressed;
+
     public bool IsConnected { get; private set; }
     public string? ConnectedDeviceName { get; private set; }
 
@@ -228,6 +230,15 @@ public class BleServiceApple : IBleService
         {
             _service.OnWillRestoreState(dict);
         }
+    }
+
+    // 兼容接口的占位实现（当前 iOS 端未发送数据，也未做启动自连）
+    public Task TryAutoConnectOnStartupAsync() => Task.CompletedTask;
+
+    public Task<bool> SendTextToDeviceAsync(string text, int chapter = 0)
+    {
+        System.Diagnostics.Debug.WriteLine("BLE iOS: SendTextToDeviceAsync not implemented");
+        return Task.FromResult(false);
     }
 }
 #endif

@@ -177,7 +177,7 @@ public partial class SettingsPage : ContentPage
         
         if (!adapter.IsEnabled)
         {
-            var enable = await DisplayAlert("蓝牙未开启", "需要开启蓝牙才能扫描设备，是否现在开启？", "开启", "取消");
+            var enable = await DisplayAlertAsync("蓝牙未开启", "需要开启蓝牙才能扫描设备，是否现在开启？", "开启", "取消");
             if (enable)
             {
                 try

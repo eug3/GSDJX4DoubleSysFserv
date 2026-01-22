@@ -75,14 +75,15 @@
                         Clicked="OnNextChapter" />
             </Grid>
 
-            <!-- 发送到设备按钮 -->
+            <!-- 发送到设备按钮（已改为自动发送，隐藏此按钮） -->
             <Button x:Name="SendToDeviceBtn"
-                    Text="📤 发送到 EPD 设备"
+                    Text="📤 手动发送到 EPD 设备"
                     BackgroundColor="#00d9ff"
                     TextColor="#000000"
                     FontAttributes="Bold"
                     CornerRadius="5"
                     HeightRequest="50"
+                    IsVisible="False"
                     Clicked="OnSendToDevice" />
 
             <!-- 加载指示器 -->

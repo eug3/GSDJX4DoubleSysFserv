@@ -24,12 +24,8 @@ public static class MauiProgram
         // 注册自定义服务
         builder.Services.AddSingleton<IStorageService, StorageService>();
 
-        // 注册蓝牙服务（按平台选择实现）
-#if ANDROID
-        builder.Services.AddSingleton<IBleService, BleServiceAndroid>();
-#else
+        // 注册蓝牙服务 - 全面使用 Shiny.NET 3.x
         builder.Services.AddSingleton<IBleService, ShinyBleService>();
-#endif
 
         // 注册微信读书服务
         builder.Services.AddSingleton<IWeReadService, WeReadService>();

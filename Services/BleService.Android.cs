@@ -1,5 +1,12 @@
 #if ANDROID
 using Android.Bluetooth;
+
+// 此文件为旧版原生 BLE 实现，目前默认使用 Shiny 实现。
+// 抑制平台 API/可空性警告，避免影响构建。
+#pragma warning disable CA1416 // 平台特定 API
+#pragma warning disable CA1422 // 过时的 Android API
+#pragma warning disable CS8602 // 可能的空引用解引用
+#pragma warning disable CS8604 // 可能的空引用参数
 using Android.Bluetooth.LE;
 using Android.Content;
 using Android.OS;
@@ -23,9 +30,18 @@ public class BleServiceAndroid : IBleService
     private ObservableCollection<BleDeviceInfo>? _scannedDevices;
     private bool _shouldAutoReconnect = true;
     private GattCallback? _gattCallback;
+    
+    // 写入同步信号
+    private TaskCompletionSource<bool>? _writeTcs;
+    private readonly SemaphoreSlim _writeSemaphore = new(1, 1);
 
     public bool IsConnected { get; private set; }
     public string? ConnectedDeviceName { get; private set; }
+
+    /// <summary>
+    /// 按键事件
+    /// </summary>
+    public event EventHandler<ButtonEventArgs>? ButtonPressed;
 
     public BleServiceAndroid(IStorageService storageService)
     {
@@ -311,7 +327,129 @@ public class BleServiceAndroid : IBleService
             foreach (var service in gatt.Services ?? Enumerable.Empty<BluetoothGattService>())
             {
                 System.Diagnostics.Debug.WriteLine($"BLE: 发现服务 - {service.Uuid}");
+                
+                // 查找可通知特征值并订阅，用于接收按键事件
+                foreach (var characteristic in service.Characteristics ?? Enumerable.Empty<BluetoothGattCharacteristic>())
+                {
+                    if ((characteristic.Properties & GattProperty.Notify) != 0)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"BLE: 订阅通知 - {characteristic.Uuid}");
+                        gatt.SetCharacteristicNotification(characteristic, true);
+                        
+                        // 设置 CCCD (Client Characteristic Configuration Descriptor)
+                        var cccd = characteristic.GetDescriptor(Java.Util.UUID.FromString("00002902-0000-1000-8000-00805f9b34fb"));
+                        if (cccd != null)
+                        {
+                            cccd.SetValue(BluetoothGattDescriptor.EnableNotificationValue.ToArray());
+                            gatt.WriteDescriptor(cccd);
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    /// <summary>
+    /// 处理特征值变化（按键事件）
+    /// </summary>
+    private void OnCharacteristicChanged(byte[] data)
+    {
+        try
+        {
+            // 将字节数据转换为字符串
+            var text = System.Text.Encoding.UTF8.GetString(data).Trim();
+            System.Diagnostics.Debug.WriteLine($"BLE: 收到通知数据 - {text}");
+
+            // 处理按键通知 (KEY:LEFT, KEY:RIGHT, KEY:UP, KEY:DOWN, KEY:OK)
+            if (text.StartsWith("KEY:"))
+            {
+                var key = text.Substring(4).ToUpper(); // 提取 KEY:后的值
+                System.Diagnostics.Debug.WriteLine($"BLE: 检测到按键 - {key}");
+                
+                // 触发按键事件
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    ButtonPressed?.Invoke(this, new ButtonEventArgs { Key = key });
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"BLE: 处理特征值变化异常 - {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 写入完成回调处理
+    /// </summary>
+    private void OnCharacteristicWriteComplete(bool success)
+    {
+        System.Diagnostics.Debug.WriteLine($"BLE: 写入完成回调 - {(success ? "成功" : "失败")}");
+        _writeTcs?.TrySetResult(success);
+    }
+
+    /// <summary>
+    /// 等待写入操作完成
+    /// </summary>
+    private async Task<bool> WriteWithResponseAsync(BluetoothGattCharacteristic characteristic, byte[] data, int timeoutMs = 5000)
+    {
+        await _writeSemaphore.WaitAsync();
+        try
+        {
+            // 检查特征值是否支持带响应写入
+            bool supportsWriteWithResponse = (characteristic.Properties & GattProperty.Write) != 0;
+            bool supportsWriteNoResponse = (characteristic.Properties & GattProperty.WriteNoResponse) != 0;
+
+            characteristic.SetValue(data);
+
+            if (supportsWriteWithResponse)
+            {
+                // 带响应写入：等待回调
+                _writeTcs = new TaskCompletionSource<bool>();
+                characteristic.WriteType = GattWriteType.Default;
+                
+                if (!_gatt!.WriteCharacteristic(characteristic))
+                {
+                    System.Diagnostics.Debug.WriteLine("BLE: WriteCharacteristic 调用失败");
+                    return false;
+                }
+
+                // 等待写入完成回调，设置超时
+                var completedTask = await Task.WhenAny(_writeTcs.Task, Task.Delay(timeoutMs));
+                if (completedTask == _writeTcs.Task)
+                {
+                    return await _writeTcs.Task;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine("BLE: 写入超时");
+                    return false;
+                }
+            }
+            else if (supportsWriteNoResponse)
+            {
+                // 无响应写入：直接写入，延迟后返回
+                characteristic.WriteType = GattWriteType.NoResponse;
+                
+                if (!_gatt!.WriteCharacteristic(characteristic))
+                {
+                    System.Diagnostics.Debug.WriteLine("BLE: WriteCharacteristic (NoResponse) 调用失败");
+                    return false;
+                }
+                
+                // 无响应写入需要适当延迟
+                await Task.Delay(20);
+                return true;
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: 特征值不支持任何写入方式");
+                return false;
+            }
+        }
+        finally
+        {
+            _writeSemaphore.Release();
         }
     }
 
@@ -351,15 +489,156 @@ public class BleServiceAndroid : IBleService
                 return false;
             }
 
-            // TODO: 实现 X4IM v2 协议的文本发送
-            // 这里需要根据协议将文本转换为位图并分片传输
-            System.Diagnostics.Debug.WriteLine($"BLE: 发送文本到设备 - 章节: {chapter}, 长度: {text.Length}");
+            if (string.IsNullOrEmpty(text))
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: 文本内容为空");
+                return false;
+            }
+
+            // 获取写特征值
+            var writeChar = FindWriteCharacteristic(_gatt);
+            if (writeChar == null)
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: 未找到可写特征值");
+                return false;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"BLE: 准备发送文本 - 章节: {chapter}, 长度: {text.Length} 字符");
+
+            // 根据 X4IM v2 协议生成帧头
+            var bookId = $"weread_{chapter}";
+            var textBytes = System.Text.Encoding.UTF8.GetBytes(text);
+            var header = X4IMProtocol.CreateHeader((uint)textBytes.Length, bookId, sd: 0);
+
+            System.Diagnostics.Debug.WriteLine($"BLE: 帧头已生成 - bookId={bookId}, payloadSize={textBytes.Length}");
+
+            // MTU 大小（安全值：512字节）
+            int MTU = 512;
+
+            // 第一个分包：帧头(32字节) + 数据
+            int firstChunkDataSize = Math.Min(MTU - 32, textBytes.Length);
+            var firstChunk = new byte[32 + firstChunkDataSize];
+            Array.Copy(header, 0, firstChunk, 0, 32);
+            Array.Copy(textBytes, 0, firstChunk, 32, firstChunkDataSize);
+
+            // 使用带响应的写入
+            if (!await WriteWithResponseAsync(writeChar, firstChunk))
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: 写入第一个分包失败");
+                return false;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"BLE: ✅ 已发送帧头 + 第一块 ({firstChunk.Length} 字节)");
+
+            // 后续分包：纯数据
+            int offset = firstChunkDataSize;
+            int chunkNum = 1;
+
+            while (offset < textBytes.Length)
+            {
+                int remainingSize = textBytes.Length - offset;
+                int currentChunkSize = Math.Min(MTU, remainingSize);
+                var chunk = new byte[currentChunkSize];
+                Array.Copy(textBytes, offset, chunk, 0, currentChunkSize);
+
+                // 使用带响应的写入
+                if (!await WriteWithResponseAsync(writeChar, chunk))
+                {
+                    System.Diagnostics.Debug.WriteLine($"BLE: 写入分包 {chunkNum} 失败");
+                    return false;
+                }
+
+                offset += currentChunkSize;
+                chunkNum++;
+
+                if (chunkNum % 10 == 0 || offset >= textBytes.Length)
+                {
+                    int percent = (int)((offset / (double)textBytes.Length) * 100);
+                    System.Diagnostics.Debug.WriteLine($"BLE: 进度 {offset}/{textBytes.Length} 字节 ({percent}%)");
+                }
+            }
+
+            System.Diagnostics.Debug.WriteLine($"BLE: ✅ 文本数据传输完成 ({chunkNum} 块，{textBytes.Length} 字节)");
+
+            // 等待一段时间确保数据被处理
+            await Task.Delay(50);
+
+            // 发送 EOF 标记通知 ESP32 传输完成
+            var eofMarker = X4IMProtocol.EOF_MARKER;
+            if (!await WriteWithResponseAsync(writeChar, eofMarker))
+            {
+                System.Diagnostics.Debug.WriteLine("BLE: 发送 EOF 标记失败");
+                return false;
+            }
+
+            System.Diagnostics.Debug.WriteLine("BLE: ✅ 已发送 EOF 标记，触发 ESP32 显示");
+
             return true;
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"BLE: 发送文本失败 - {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"BLE: ❌ 发送文本失败 - {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"BLE: 堆栈: {ex.StackTrace}");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// 查找设备的可写特征值
+    /// 优先选择带响应的Write，其次WriteWithoutResponse
+    /// </summary>
+    private BluetoothGattCharacteristic? FindWriteCharacteristic(BluetoothGatt gatt)
+    {
+        try
+        {
+            BluetoothGattCharacteristic? writeWithResponse = null;
+            BluetoothGattCharacteristic? writeWithoutResponse = null;
+
+            foreach (var service in gatt.Services ?? Enumerable.Empty<BluetoothGattService>())
+            {
+                System.Diagnostics.Debug.WriteLine($"BLE: 扫描服务 - {service.Uuid}");
+                
+                foreach (var characteristic in service.Characteristics ?? Enumerable.Empty<BluetoothGattCharacteristic>())
+                {
+                    var props = characteristic.Properties;
+                    System.Diagnostics.Debug.WriteLine($"BLE:   特征值 {characteristic.Uuid} - 属性: {props}");
+                    
+                    // 优先选择带响应的写入
+                    if ((props & GattProperty.Write) != 0)
+                    {
+                        writeWithResponse = characteristic;
+                        System.Diagnostics.Debug.WriteLine($"BLE: ✅ 找到可写特征值(带响应) - {characteristic.Uuid}");
+                    }
+                    
+                    // 备选：无响应写入
+                    if ((props & GattProperty.WriteNoResponse) != 0 && writeWithoutResponse == null)
+                    {
+                        writeWithoutResponse = characteristic;
+                        System.Diagnostics.Debug.WriteLine($"BLE: 找到可写特征值(无响应) - {characteristic.Uuid}");
+                    }
+                }
+            }
+
+            // 优先返回带响应的特征值
+            if (writeWithResponse != null)
+            {
+                System.Diagnostics.Debug.WriteLine($"BLE: 使用带响应写入特征值");
+                return writeWithResponse;
+            }
+            
+            if (writeWithoutResponse != null)
+            {
+                System.Diagnostics.Debug.WriteLine($"BLE: ⚠️ 使用无响应写入特征值（可能不稳定）");
+                return writeWithoutResponse;
+            }
+
+            System.Diagnostics.Debug.WriteLine("BLE: ❌ 未找到任何可写特征值");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"BLE: 查找特征值异常 - {ex.Message}");
+            return null;
         }
     }
 
@@ -414,6 +693,26 @@ public class BleServiceAndroid : IBleService
             base.OnServicesDiscovered(gatt, status);
             _service.OnServicesDiscovered(gatt, status);
         }
+
+        public override void OnCharacteristicChanged(BluetoothGatt? gatt, BluetoothGattCharacteristic? characteristic)
+        {
+            base.OnCharacteristicChanged(gatt, characteristic);
+            if (characteristic?.GetValue() is byte[] data && data.Length > 0)
+            {
+                _service.OnCharacteristicChanged(data);
+            }
+        }
+
+        public override void OnCharacteristicWrite(BluetoothGatt? gatt, BluetoothGattCharacteristic? characteristic, GattStatus status)
+        {
+            base.OnCharacteristicWrite(gatt, characteristic, status);
+            _service.OnCharacteristicWriteComplete(status == GattStatus.Success);
+        }
     }
 }
+
+#pragma warning restore CA1416
+#pragma warning restore CA1422
+#pragma warning restore CS8602
+#pragma warning restore CS8604
 #endif

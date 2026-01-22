@@ -87,6 +87,11 @@ public interface IWeReadService
     /// 从本地存储加载阅读状态
     /// </summary>
     Task LoadStateAsync();
+
+    /// <summary>
+    /// 发送当前文本内容到 BLE 设备
+    /// </summary>
+    Task<bool> SendToDeviceAsync(IBleService bleService);
 }
 
 /// <summary>
@@ -100,7 +105,7 @@ public class WeReadService : IWeReadService
 
     private const string StateKey = "WeRead_State";
 
-    public string ServerUrl { get; set; } = "https://weread.guaishoudejia.com";
+    public string ServerUrl { get; set; } = "http://home.onino.xyz:18008";
     public WeReadState State { get; private set; } = new();
 
     public WeReadService(IStorageService storageService)
@@ -240,6 +245,44 @@ public class WeReadService : IWeReadService
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"WeRead: 加载状态失败 - {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 发送当前文本内容到 BLE 设备
+    /// 使用 X4IM v2 协议，自动添加 EOF 标记
+    /// </summary>
+    /// <param name="bleService">BLE 服务</param>
+    /// <returns>是否发送成功</returns>
+    public async Task<bool> SendToDeviceAsync(IBleService bleService)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(State.LastText))
+            {
+                System.Diagnostics.Debug.WriteLine("WeRead: 没有要发送的文本内容");
+                return false;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"WeRead: 开始发送文本到设备 (页数: {State.Page}, 字符数: {State.LastText.Length})");
+            
+            var result = await bleService.SendTextToDeviceAsync(State.LastText, State.Page);
+            
+            if (result)
+            {
+                System.Diagnostics.Debug.WriteLine($"WeRead: 文本发送成功");
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine($"WeRead: 文本发送失败");
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"WeRead: 发送文本异常 - {ex.Message}");
+            return false;
         }
     }
 }

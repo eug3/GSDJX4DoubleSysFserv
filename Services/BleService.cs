@@ -38,4 +38,27 @@ public interface IBleService
     /// <param name="chapter">章节号</param>
     /// <returns>是否发送成功</returns>
     Task<bool> SendTextToDeviceAsync(string text, int chapter = 0);
+
+    /// <summary>
+    /// 按键事件委托
+    /// </summary>
+    event EventHandler<ButtonEventArgs>? ButtonPressed;
+}
+
+/// <summary>
+/// 按键事件参数
+/// </summary>
+public class ButtonEventArgs : EventArgs
+{
+    /// <summary>
+    /// 按键类型: LEFT, RIGHT, UP, DOWN, OK
+    /// </summary>
+    public string Key { get; set; } = string.Empty;
+
+    public ButtonEventArgs() { }
+
+    public ButtonEventArgs(string key)
+    {
+        Key = key;
+    }
 }
