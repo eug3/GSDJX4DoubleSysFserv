@@ -42,6 +42,11 @@ public class BleServiceAndroid : IBleService
     /// 按键事件
     /// </summary>
     public event EventHandler<ButtonEventArgs>? ButtonPressed;
+    
+    /// <summary>
+    /// 连接状态变化事件
+    /// </summary>
+    public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
 
     public BleServiceAndroid(IStorageService storageService)
     {
@@ -286,12 +291,19 @@ public class BleServiceAndroid : IBleService
             // 通知连接成功
             _connectTcs?.TrySetResult(true);
             
+            // 触发连接状态变化事件
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(true, ConnectedDeviceName, ConnectionChangeReason.UserInitiated));
+            });
+            
             // 发现服务
             gatt?.DiscoverServices();
         }
         else if (newState == ProfileState.Disconnected)
         {
             var wasConnected = IsConnected;
+            var previousDeviceName = ConnectedDeviceName;
             IsConnected = false;
             ConnectedDeviceName = null;
             System.Diagnostics.Debug.WriteLine("BLE: 连接已断开");
@@ -300,6 +312,15 @@ public class BleServiceAndroid : IBleService
             if (_connectTcs != null && !_connectTcs.Task.IsCompleted)
             {
                 _connectTcs.TrySetResult(false);
+            }
+            
+            // 触发连接状态变化事件
+            if (wasConnected)
+            {
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(false, previousDeviceName, ConnectionChangeReason.DeviceDisconnected));
+                });
             }
 
             // 后台自动重连（仅当之前已连接时）

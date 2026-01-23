@@ -1,5 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+#if IOS
+using Foundation;
+#endif
 
 namespace GSDJX4DoubleSysFserv.Services;
 
@@ -105,20 +108,53 @@ public class WeReadService : IWeReadService
 
     private const string StateKey = "WeRead_State";
 
-    public string ServerUrl { get; set; } = "http://home.onino.xyz:18008";
+    public string ServerUrl { get; set; } = "https://3gx043ki8112.vicp.fun";
     public WeReadState State { get; private set; } = new();
 
     public WeReadService(IStorageService storageService)
     {
         _storageService = storageService;
-        _httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(60)
-        };
+        
+        // 创建支持后台的 HttpClient
+        _httpClient = CreateBackgroundHttpClient();
+        
         _jsonOptions = new JsonSerializerOptions
         {
             PropertyNameCaseInsensitive = true
         };
+    }
+
+    /// <summary>
+    /// 创建支持后台运行的 HttpClient
+    /// </summary>
+    private static HttpClient CreateBackgroundHttpClient()
+    {
+#if IOS
+        // iOS: 使用 NSUrlSession 后台配置
+        var config = Foundation.NSUrlSessionConfiguration.DefaultSessionConfiguration;
+        config.TimeoutIntervalForRequest = 60;
+        config.TimeoutIntervalForResource = 120;
+        config.WaitsForConnectivity = true; // 等待网络连接可用
+        config.AllowsCellularAccess = true;
+        
+        var handler = new NSUrlSessionHandler(config);
+        return new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(60)
+        };
+#else
+        // Android/其他平台: 使用默认配置
+        var handler = new HttpClientHandler
+        {
+            // 允许自动重定向
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 5
+        };
+        return new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(60)
+        };
+#endif
     }
 
     public void SetReadingContext(string url, string cookie)
@@ -172,45 +208,81 @@ public class WeReadService : IWeReadService
         };
 
         var jsonContent = JsonSerializer.Serialize(requestBody, _jsonOptions);
-        var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
-
+        
         System.Diagnostics.Debug.WriteLine($"WeRead API: {action} -> {apiUrl}");
         System.Diagnostics.Debug.WriteLine($"WeRead Request: {jsonContent}");
 
-        var response = await _httpClient.PostAsync(apiUrl, httpContent);
-        var responseContent = await response.Content.ReadAsStringAsync();
+        // 重试机制：最多重试 3 次
+        const int maxRetries = 3;
+        Exception? lastException = null;
 
-        System.Diagnostics.Debug.WriteLine($"WeRead Response ({response.StatusCode}): {responseContent.Substring(0, Math.Min(200, responseContent.Length))}...");
-
-        if (!response.IsSuccessStatusCode)
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            throw new Exception($"API 请求失败: {response.StatusCode} - {responseContent}");
+            try
+            {
+                var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+                
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                var response = await _httpClient.PostAsync(apiUrl, httpContent, cts.Token);
+                var responseContent = await response.Content.ReadAsStringAsync(cts.Token);
+
+                System.Diagnostics.Debug.WriteLine($"WeRead Response ({response.StatusCode}): {responseContent.Substring(0, Math.Min(200, responseContent.Length))}...");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new Exception($"API 请求失败: {response.StatusCode} - {responseContent}");
+                }
+
+                var result = JsonSerializer.Deserialize<WeReadResponse>(responseContent, _jsonOptions);
+
+                if (result == null)
+                {
+                    throw new Exception("API 响应解析失败");
+                }
+
+                if (!result.Success)
+                {
+                    throw new Exception(result.Error ?? "RemoteServe 返回失败");
+                }
+
+                // 更新 Cookie 和 URL（如果服务器返回了新的）
+                if (!string.IsNullOrEmpty(result.Cookie))
+                {
+                    State.Cookie = result.Cookie;
+                }
+
+                if (!string.IsNullOrEmpty(result.Url))
+                {
+                    State.CurrentUrl = result.Url;
+                }
+
+                return result.GetText();
+            }
+            catch (HttpRequestException ex) when (attempt < maxRetries)
+            {
+                // 网络错误，等待后重试
+                lastException = ex;
+                System.Diagnostics.Debug.WriteLine($"WeRead: 网络请求失败 (尝试 {attempt}/{maxRetries}): {ex.Message}");
+                await Task.Delay(1000 * attempt); // 指数退避
+            }
+            catch (TaskCanceledException ex) when (attempt < maxRetries)
+            {
+                // 超时，等待后重试
+                lastException = ex;
+                System.Diagnostics.Debug.WriteLine($"WeRead: 请求超时 (尝试 {attempt}/{maxRetries})");
+                await Task.Delay(1000 * attempt);
+            }
+            catch (Exception ex) when (ex.Message.Contains("network connection was lost") && attempt < maxRetries)
+            {
+                // iOS 后台网络断开，等待后重试
+                lastException = ex;
+                System.Diagnostics.Debug.WriteLine($"WeRead: 网络连接丢失 (尝试 {attempt}/{maxRetries}): {ex.Message}");
+                await Task.Delay(2000 * attempt);
+            }
         }
 
-        var result = JsonSerializer.Deserialize<WeReadResponse>(responseContent, _jsonOptions);
-
-        if (result == null)
-        {
-            throw new Exception("API 响应解析失败");
-        }
-
-        if (!result.Success)
-        {
-            throw new Exception(result.Error ?? "RemoteServe 返回失败");
-        }
-
-        // 更新 Cookie 和 URL（如果服务器返回了新的）
-        if (!string.IsNullOrEmpty(result.Cookie))
-        {
-            State.Cookie = result.Cookie;
-        }
-
-        if (!string.IsNullOrEmpty(result.Url))
-        {
-            State.CurrentUrl = result.Url;
-        }
-
-        return result.GetText();
+        // 所有重试都失败
+        throw new Exception($"网络请求失败 (已重试 {maxRetries} 次): {lastException?.Message ?? "未知错误"}");
     }
 
     public async Task SaveStateAsync()

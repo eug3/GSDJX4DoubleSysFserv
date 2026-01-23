@@ -36,6 +36,7 @@ public static class MauiProgram
         builder.Services.AddTransient<Views.EPDReadingPage>();
 
 #if DEBUG
+        // 添加调试日志输出 - 在 Visual Studio / VS Code 的输出窗口可见
         builder.Logging.AddDebug();
 #endif
 

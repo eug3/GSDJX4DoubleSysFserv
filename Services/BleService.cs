@@ -43,6 +43,72 @@ public interface IBleService
     /// 按键事件委托
     /// </summary>
     event EventHandler<ButtonEventArgs>? ButtonPressed;
+
+    /// <summary>
+    /// 连接状态变化事件
+    /// </summary>
+    event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
+}
+
+/// <summary>
+/// 连接状态变化事件参数
+/// </summary>
+public class ConnectionStateChangedEventArgs : EventArgs
+{
+    /// <summary>
+    /// 是否已连接
+    /// </summary>
+    public bool IsConnected { get; set; }
+
+    /// <summary>
+    /// 设备名称
+    /// </summary>
+    public string? DeviceName { get; set; }
+
+    /// <summary>
+    /// 状态变化原因
+    /// </summary>
+    public ConnectionChangeReason Reason { get; set; }
+
+    public ConnectionStateChangedEventArgs() { }
+
+    public ConnectionStateChangedEventArgs(bool isConnected, string? deviceName, ConnectionChangeReason reason)
+    {
+        IsConnected = isConnected;
+        DeviceName = deviceName;
+        Reason = reason;
+    }
+}
+
+/// <summary>
+/// 连接状态变化原因
+/// </summary>
+public enum ConnectionChangeReason
+{
+    /// <summary>
+    /// 用户主动连接
+    /// </summary>
+    UserInitiated,
+
+    /// <summary>
+    /// 自动重连
+    /// </summary>
+    AutoReconnect,
+
+    /// <summary>
+    /// 用户主动断开
+    /// </summary>
+    UserDisconnected,
+
+    /// <summary>
+    /// 设备断开
+    /// </summary>
+    DeviceDisconnected,
+
+    /// <summary>
+    /// 删除已保存设备
+    /// </summary>
+    DeviceDeleted
 }
 
 /// <summary>

@@ -21,6 +21,9 @@ public partial class WeReadPage : ContentPage
     {
         InitializeComponent();
         _bleService = bleService;
+        
+        // 订阅连接状态变化事件
+        _bleService.ConnectionStateChanged += OnConnectionStateChanged;
     }
 
     private void ContentPage_Loaded(object? sender, EventArgs e)
@@ -29,6 +32,17 @@ public partial class WeReadPage : ContentPage
 
     private void ContentPage_Unloaded(object? sender, EventArgs e)
     {
+    }
+    
+    /// <summary>
+    /// 处理蓝牙连接状态变化
+    /// </summary>
+    private void OnConnectionStateChanged(object? sender, ConnectionStateChangedEventArgs e)
+    {
+        // 当连接状态变化时，重新检查浮动按钮可见性
+        CheckFloatingButtonVisibility(_currentUrl);
+        
+        System.Diagnostics.Debug.WriteLine($"WeRead: 蓝牙连接状态变化 - IsConnected: {e.IsConnected}, Device: {e.DeviceName}, Reason: {e.Reason}");
     }
 
     private void WebView_Navigated(object? sender, WebNavigatedEventArgs e)
@@ -64,7 +78,7 @@ public partial class WeReadPage : ContentPage
         }
 
         // 检查是否是阅读器页面
-        bool isReaderPage = ReaderUrlRegex.IsMatch(url);
+        bool isReaderPage = ReaderUrlRegex.IsMatch(url)  ; 
         // 检查蓝牙是否已连接
         bool isBleConnected = _bleService.IsConnected;
 

@@ -38,10 +38,40 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>App 需要在使用期间访问定位以扫描蓝牙设备</string>
 	
-	<!-- 后台蓝牙模式 -->
+	<!-- 后台模式 -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
+		<string>fetch</string>
+		<string>processing</string>
 	</array>
+	
+	<!-- 后台任务标识符 -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.guaishoudejia.gsdjx4doublesysfserv.refresh</string>
+	</array>
+	
+	<!-- App Transport Security - 允许后台网络请求 -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<!-- 允许 RemoteServe 域名 -->
+			<key>vicp.fun</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<false/>
+				<key>NSExceptionMinimumTLSVersion</key>
+				<string>TLSv1.2</string>
+			</dict>
+		</dict>
+	</dict>
 </dict>
 </plist>

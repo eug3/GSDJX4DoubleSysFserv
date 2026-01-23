@@ -10,6 +10,12 @@ namespace GSDJX4DoubleSysFserv.Services;
 
 /// <summary>
 /// 基于 Shiny.NET 3.x 的蓝牙服务 - 支持后台持久化
+/// 
+/// 架构说明：
+/// - ShinyBleService: 前台服务层，处理 UI 请求（扫描、连接、发送数据）
+/// - ShinyBleDelegate: 后台委托，处理后台事件（设备断开重连、通知接收）
+/// 
+/// 两者通过静态事件通信，确保后台事件能够正确更新服务状态
 /// </summary>
 public class ShinyBleService : IBleService
 {
@@ -29,6 +35,9 @@ public class ShinyBleService : IBleService
     
     // 按键事件
     public event EventHandler<ButtonEventArgs>? ButtonPressed;
+    
+    // 连接状态变化事件
+    public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
 
     public bool IsConnected { get; private set; }
     public string? ConnectedDeviceName { get; private set; }
@@ -38,6 +47,89 @@ public class ShinyBleService : IBleService
         _bleManager = bleManager;
         _storageService = storageService;
         _logger = logger;
+        
+        // 订阅后台委托的事件
+        SubscribeToBackgroundDelegateEvents();
+    }
+
+    /// <summary>
+    /// 订阅 ShinyBleDelegate 的后台事件
+    /// </summary>
+    private void SubscribeToBackgroundDelegateEvents()
+    {
+        // 后台连接成功事件
+        ShinyBleDelegate.PeripheralConnectedInBackground += OnPeripheralConnectedInBackground;
+        
+        // 后台断开事件
+        ShinyBleDelegate.PeripheralDisconnectedInBackground += OnPeripheralDisconnectedInBackground;
+        
+        // 后台通知事件
+        ShinyBleDelegate.NotificationReceivedInBackground += OnNotificationReceivedInBackground;
+        
+        _logger.LogInformation("BLE Service: 已订阅后台委托事件");
+    }
+
+    /// <summary>
+    /// 处理后台连接成功事件
+    /// </summary>
+    private async void OnPeripheralConnectedInBackground(object? sender, BlePeripheralEventArgs e)
+    {
+        _logger.LogInformation($"BLE Service: 收到后台连接事件 - {e.Peripheral.Name}");
+        
+        // 检查是否是我们保存的设备
+        var savedDeviceId = await GetSavedMacAddress();
+        if (savedDeviceId == e.Peripheral.Uuid)
+        {
+            _connectedPeripheral = e.Peripheral;
+            IsConnected = true;
+            ConnectedDeviceName = e.Peripheral.Name ?? "未知设备";
+            
+            // 缓存写入特征
+            await CacheWriteCharacteristicAsync();
+            
+            // 通知 UI 层
+            NotifyConnectionStateChanged(true, ConnectedDeviceName, ConnectionChangeReason.AutoReconnect);
+            
+            _logger.LogInformation($"BLE Service: 后台重连成功 - {ConnectedDeviceName}");
+        }
+    }
+
+    /// <summary>
+    /// 处理后台断开事件
+    /// </summary>
+    private async void OnPeripheralDisconnectedInBackground(object? sender, BlePeripheralEventArgs e)
+    {
+        _logger.LogInformation($"BLE Service: 收到后台断开事件 - {e.Peripheral.Name}");
+        
+        // 检查是否是当前连接的设备
+        var savedDeviceId = await GetSavedMacAddress();
+        if (savedDeviceId == e.Peripheral.Uuid && IsConnected)
+        {
+            var previousDeviceName = ConnectedDeviceName;
+            IsConnected = false;
+            _writeServiceUuid = null;
+            _writeCharacteristicUuid = null;
+            
+            // 通知 UI 层
+            NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.DeviceDisconnected);
+            
+            _logger.LogWarning($"BLE Service: 后台设备断开 - {previousDeviceName}");
+        }
+    }
+
+    /// <summary>
+    /// 处理后台通知事件
+    /// </summary>
+    private void OnNotificationReceivedInBackground(object? sender, BleNotificationEventArgs e)
+    {
+        _logger.LogInformation($"BLE Service: 收到后台通知 - {e.Message}");
+        
+        // 解析按键事件 (格式: "BTN:LEFT", "BTN:RIGHT", etc.)
+        if (e.Message.StartsWith("BTN:"))
+        {
+            var key = e.Message.Substring(4);
+            ButtonPressed?.Invoke(this, new ButtonEventArgs(key));
+        }
     }
 
     /// <summary>
@@ -54,12 +146,37 @@ public class ShinyBleService : IBleService
                 return;
             }
 
+            // 检查是否是旧版 MAC 地址格式（包含冒号），如果是则清除旧数据
+            if (savedDeviceId.Contains(":"))
+            {
+                _logger.LogInformation($"BLE: 检测到旧版 MAC 地址格式 ({savedDeviceId})，将使用新 UUID 格式重新配对");
+                await DeleteSavedMacAddress();
+                return;
+            }
+
             _logger.LogInformation($"BLE: 启动时尝试自动连接设备 {savedDeviceId}...");
             await ScanAndConnectToSavedDeviceAsync();
         }
         catch (Exception ex)
         {
             _logger.LogError($"BLE: 启动时自动连接失败 - {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 确保有蓝牙访问权限（先检查再请求，避免重复弹窗）
+    /// </summary>
+    private async Task<bool> EnsureBleAccessAsync()
+    {
+        try
+        {
+            var access = await _bleManager.RequestAccess().FirstAsync();
+            return access == AccessState.Available;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"BLE: 权限检查错误 - {ex.Message}");
+            return false;
         }
     }
 
@@ -72,14 +189,13 @@ public class ShinyBleService : IBleService
         if (string.IsNullOrEmpty(savedDeviceId))
             return;
 
-        _logger.LogInformation($"BLE: 扫描查找设备 {savedDeviceId}...");
+        _logger.LogInformation($"BLE: 扫描查找已保存的设备 {savedDeviceId}...");
 
         try
         {
-            var access = await _bleManager.RequestAccess().FirstAsync();
-            if (access != AccessState.Available)
+            if (!await EnsureBleAccessAsync())
             {
-                _logger.LogWarning($"BLE: 权限请求失败 - {access}");
+                _logger.LogWarning($"BLE: 权限请求失败");
                 return;
             }
 
@@ -95,6 +211,8 @@ public class ShinyBleService : IBleService
                         var deviceId = peripheral.Uuid;
                         deviceCount++;
 
+                        _logger.LogDebug($"BLE: 发现设备 - {peripheral.Name ?? "未知"} (UUID: {deviceId})");
+
                         if (deviceId == savedDeviceId)
                         {
                             found = true;
@@ -106,7 +224,7 @@ public class ShinyBleService : IBleService
                             _logger.LogInformation($"BLE: 找到已保存的设备 {peripheral.Name ?? "未知"}");
                             MainThread.BeginInvokeOnMainThread(async () =>
                             {
-                                await ConnectAsync(savedDeviceId, savedDeviceId);
+                                await ConnectAsync(deviceId, savedDeviceId);
                             });
                         }
                     },
@@ -122,7 +240,7 @@ public class ShinyBleService : IBleService
             {
                 _bleManager.StopScan();
                 _scanSubscription?.Dispose();
-                _logger.LogWarning($"BLE: 扫描了 {deviceCount} 个设备，未找到已保存的设备");
+                _logger.LogWarning($"BLE: 扫描了 {deviceCount} 个设备，未找到已保存的设备 (ID: {savedDeviceId})");
             }
         }
         catch (Exception ex)
@@ -143,8 +261,32 @@ public class ShinyBleService : IBleService
 
     public async Task DeleteSavedMacAddress()
     {
+        var previousDeviceName = ConnectedDeviceName;
+        var wasConnected = IsConnected;
+        
         await _storageService.RemoveAsync(SavedMacKey);
-        Disconnect();
+        
+        // 断开连接但不触发 UserDisconnected 事件
+        _notifySubscription?.Dispose();
+        _notifySubscription = null;
+        _writeServiceUuid = null;
+        _writeCharacteristicUuid = null;
+
+        if (_connectedPeripheral != null)
+        {
+            _connectedPeripheral.CancelConnection();
+            _connectedPeripheral = null;
+        }
+        
+        IsConnected = false;
+        ConnectedDeviceName = null;
+        _logger.LogInformation("BLE: 已删除保存的设备并断开连接");
+        
+        // 只有之前已连接时才触发事件
+        if (wasConnected)
+        {
+            NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.DeviceDeleted);
+        }
     }
 
     public async Task<bool> ConnectAsync(string deviceId, string macAddress)
@@ -153,52 +295,154 @@ public class ShinyBleService : IBleService
         {
             if (_discoveredPeripherals.TryGetValue(deviceId, out var peripheral))
             {
-                _connectedPeripheral = peripheral;
-                _writeServiceUuid = null;
-                _writeCharacteristicUuid = null; // 清空旧缓存，确保后续重新发现
-
-                // Shiny 3.x: 使用 WhenStatusChanged() 等待连接
-                var connectTask = peripheral
-                    .WhenStatusChanged()
-                    .Where(x => x == ConnectionState.Connected)
-                    .Take(1)
-                    .Timeout(TimeSpan.FromSeconds(15))
-                    .FirstAsync();
-
-                // 连接配置：AutoConnect=true 支持后台自动重连
-                peripheral.Connect(new ConnectionConfig
-                {
-                    AutoConnect = true
-                });
-                await connectTask;
-
-                IsConnected = true;
-                ConnectedDeviceName = peripheral.Name ?? "未知设备";
-                _logger.LogInformation($"BLE: 已连接到 {ConnectedDeviceName}");
-
-                // 缓存写入特征值以提升性能
-                await CacheWriteCharacteristicAsync();
-
-                // 订阅通知特征（当前固件暂无通知，保持兼容占位）
-                await SubscribeToNotificationsAsync();
-
-                // 监听断开事件
-                SetupDisconnectionHandler();
-
-                // 保存 MAC 地址
-                await SaveMacAddress(deviceId);
-
-                return true;
+                return await ConnectToPeripheralAsync(peripheral, deviceId);
             }
             else
             {
-                _logger.LogWarning($"BLE: 未找到设备 {deviceId}");
+                // 设备不在已发现列表中，先扫描查找
+                _logger.LogWarning($"BLE: 未在缓存中找到设备 {deviceId}，开始扫描...");
+                
+                // 扫描并查找目标设备
+                var foundDevice = await ScanForDeviceAsync(deviceId);
+                if (foundDevice != null)
+                {
+                    return await ConnectToPeripheralAsync(foundDevice, deviceId);
+                }
+                
+                _logger.LogWarning($"BLE: 扫描后仍未找到设备 {deviceId}");
                 return false;
             }
         }
         catch (Exception ex)
         {
             _logger.LogError($"BLE: 连接错误 - {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 扫描查找指定设备
+    /// </summary>
+    private async Task<IPeripheral?> ScanForDeviceAsync(string targetDeviceId)
+    {
+        try
+        {
+            if (!await EnsureBleAccessAsync())
+            {
+                _logger.LogWarning($"BLE: 权限请求失败");
+                return null;
+            }
+
+            var foundPeripheral = (IPeripheral?)null;
+            var deviceCount = 0;
+
+            var scanCompletion = new TaskCompletionSource<bool>();
+            
+            _scanSubscription = _bleManager
+                .Scan()
+                .Subscribe(
+                    scanResult =>
+                    {
+                        var peripheral = scanResult.Peripheral;
+                        deviceCount++;
+                        
+                        var peripheralUuid = peripheral.Uuid;
+                        _discoveredPeripherals[peripheralUuid] = peripheral;
+                        
+                        _logger.LogDebug($"BLE: 发现设备 - {peripheral.Name ?? "未知"} (UUID: {peripheralUuid})");
+
+                        if (peripheralUuid == targetDeviceId)
+                        {
+                            foundPeripheral = peripheral;
+                            _logger.LogInformation($"BLE: 找到目标设备 {peripheral.Name}");
+                            _bleManager.StopScan();
+                            _scanSubscription?.Dispose();
+                            scanCompletion.TrySetResult(true);
+                        }
+                    },
+                    error =>
+                    {
+                        _logger.LogError($"BLE: 扫描错误 - {error.Message}");
+                        scanCompletion.TrySetException(error);
+                    }
+                );
+
+            // 最多扫描 10 秒
+            var timeoutTask = Task.Delay(10000);
+            var completedTask = await Task.WhenAny(scanCompletion.Task, timeoutTask);
+            
+            if (!scanCompletion.Task.IsCompleted)
+            {
+                _bleManager.StopScan();
+                _scanSubscription?.Dispose();
+                _logger.LogWarning($"BLE: 扫描超时，扫描了 {deviceCount} 个设备");
+            }
+
+            return foundPeripheral;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"BLE: 扫描设备失败 - {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 连接到外设
+    /// </summary>
+    private async Task<bool> ConnectToPeripheralAsync(IPeripheral peripheral, string deviceId)
+    {
+        try
+        {
+            _connectedPeripheral = peripheral;
+            _writeServiceUuid = null;
+            _writeCharacteristicUuid = null;
+
+            _logger.LogInformation($"BLE: 开始连接到 {peripheral.Name ?? "未知设备"}...");
+
+            // Shiny 3.x: 使用 WhenStatusChanged() 等待连接
+            var connectTask = peripheral
+                .WhenStatusChanged()
+                .Where(x => x == ConnectionState.Connected)
+                .Take(1)
+                .Timeout(TimeSpan.FromSeconds(15))
+                .FirstAsync();
+
+            // 连接配置：AutoConnect=true 支持后台自动重连
+            peripheral.Connect(new ConnectionConfig
+            {
+                AutoConnect = true
+            });
+            await connectTask;
+
+            IsConnected = true;
+            ConnectedDeviceName = peripheral.Name ?? "未知设备";
+            _logger.LogInformation($"BLE: 已连接到 {ConnectedDeviceName}");
+
+            // 触发连接状态变化事件
+            NotifyConnectionStateChanged(true, ConnectedDeviceName, ConnectionChangeReason.UserInitiated);
+
+            // 缓存写入特征值以提升性能
+            await CacheWriteCharacteristicAsync();
+
+            // 订阅通知特征（当前固件暂无通知，保持兼容占位）
+            await SubscribeToNotificationsAsync();
+
+            // 监听断开事件
+            SetupDisconnectionHandler();
+
+            // 保存设备 UUID（用于后续自动连接）
+            var peripheralUuid = peripheral.Uuid;
+            _logger.LogInformation($"BLE: 保存设备 UUID: {peripheralUuid}");
+            await SaveMacAddress(peripheralUuid);
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"BLE: 连接外设失败 - {ex.Message}");
+            IsConnected = false;
+            _connectedPeripheral = null;
             return false;
         }
     }
@@ -215,12 +459,16 @@ public class ShinyBleService : IBleService
             .Where(x => x == ConnectionState.Disconnected)
             .Subscribe(_ =>
             {
-                _logger.LogWarning($"BLE: 设备 {ConnectedDeviceName} 已断开");
+                var previousDeviceName = ConnectedDeviceName;
+                _logger.LogWarning($"BLE: 设备 {previousDeviceName} 已断开");
                 IsConnected = false;
                 _writeServiceUuid = null;
                 _writeCharacteristicUuid = null; // 清空缓存的特征值，防止重连后使用旧句柄
                 _notifySubscription?.Dispose();
                 _notifySubscription = null;
+                
+                // 触发连接状态变化事件
+                NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.DeviceDisconnected);
                 
                 // 尝试自动重连
                 MainThread.BeginInvokeOnMainThread(async () =>
@@ -236,7 +484,7 @@ public class ShinyBleService : IBleService
     }
 
     /// <summary>
-    /// 订阅通知特征（接收设备按键事件）
+    /// 订阅通知特征（接收设备按键事件）- 动态发现方式
     /// </summary>
     private async Task SubscribeToNotificationsAsync()
     {
@@ -246,9 +494,53 @@ public class ShinyBleService : IBleService
         {
             _notifySubscription?.Dispose();
 
-            // 当前 ESP32 固件只暴露 SPP 服务 (0xABF0) 且未提供通知特征，这里保持兼容：
-            // 如果未来固件增加可通知特征，再在此处按需订阅。
-            _logger.LogInformation("BLE: 当前固件未发现可通知特征，跳过订阅（按键事件将不可用）");
+            // 获取所有特征并查找具有 Notify 属性的特征
+            var allCharacteristics = await _connectedPeripheral
+                .GetAllCharacteristics()
+                .FirstAsync();
+
+            _logger.LogInformation($"BLE: 搜索可通知特征，共 {allCharacteristics.Count} 个特征");
+
+            // 排除标准服务
+            static bool IsExcludedService(string uuid)
+            {
+                var u = uuid.ToLowerInvariant();
+                return u == "00001800-0000-1000-8000-00805f9b34fb" // Generic Access
+                    || u == "00001801-0000-1000-8000-00805f9b34fb"; // Generic Attribute
+            }
+
+            // 查找具有 Notify 属性的特征
+            var notifyChar = allCharacteristics.FirstOrDefault(ch =>
+                !IsExcludedService(ch.Service.Uuid) &&
+                (ch.Properties.HasFlag(CharacteristicProperties.Notify) ||
+                 ch.Properties.HasFlag(CharacteristicProperties.Indicate)));
+
+            if (notifyChar != null)
+            {
+                _logger.LogInformation($"BLE: ✅ 找到可通知特征: {notifyChar.Uuid} @ 服务 {notifyChar.Service.Uuid}");
+
+                // 订阅通知
+                _notifySubscription = _connectedPeripheral
+                    .NotifyCharacteristic(
+                        notifyChar.Service.Uuid,
+                        notifyChar.Uuid,
+                        useIndicationsIfAvailable: false
+                    )
+                    .Subscribe(notificationResult =>
+                    {
+                        if (notificationResult.Data != null)
+                        {
+                            var data = notificationResult.Data.ToArray();
+                            ProcessNotification(data);
+                        }
+                    });
+
+                _logger.LogInformation("BLE: 已订阅通知，按键事件可用");
+            }
+            else
+            {
+                _logger.LogWarning("BLE: 未发现可通知特征，按键事件将不可用");
+            }
         }
         catch (Exception ex)
         {
@@ -281,6 +573,8 @@ public class ShinyBleService : IBleService
 
     public void Disconnect()
     {
+        var previousDeviceName = ConnectedDeviceName;
+        
         _notifySubscription?.Dispose();
         _notifySubscription = null;
         _writeServiceUuid = null;
@@ -295,6 +589,20 @@ public class ShinyBleService : IBleService
         IsConnected = false;
         ConnectedDeviceName = null;
         _logger.LogInformation("BLE: 已断开连接");
+        
+        // 触发连接状态变化事件
+        NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.UserDisconnected);
+    }
+
+    /// <summary>
+    /// 通知连接状态变化
+    /// </summary>
+    private void NotifyConnectionStateChanged(bool isConnected, string? deviceName, ConnectionChangeReason reason)
+    {
+        MainThread.BeginInvokeOnMainThread(() =>
+        {
+            ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(isConnected, deviceName, reason));
+        });
     }
 
     /// <summary>
@@ -439,7 +747,6 @@ public class ShinyBleService : IBleService
                 var data = Encoding.UTF8.GetBytes(text);
                 var bookId = $"weread_{chapter}";
                 var header = CreateX4IMv2Header(data.Length, 0, bookId);
-                var eofMarker = new byte[] { 0x00, 0x45, 0x4F, 0x46, 0x0A }; // \x00EOF\n
                 _logger.LogInformation($"BLE: 发送文件 bookId=\"{bookId}\", size={data.Length} 字节");
 
                 if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
@@ -453,18 +760,26 @@ public class ShinyBleService : IBleService
                     return false;
                 }
 
+                // 第一步：发送 header + 数据
                 using var ms = new MemoryStream();
                 ms.Write(header, 0, header.Length);
                 ms.Write(data, 0, data.Length);
-                ms.Write(eofMarker, 0, eofMarker.Length);
                 ms.Position = 0;
 
-                // Shiny 内置分片写入，自动处理 MTU
                 await _connectedPeripheral!
                     .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, ms)
                     .LastOrDefaultAsync();
 
-                _logger.LogInformation($"BLE: 文件数据传输完成! 总字节 {data.Length + header.Length + eofMarker.Length}");
+                _logger.LogInformation($"BLE: 文件数据传输完成! {data.Length} 字节");
+
+                // 第二步：单独发送 EOF 标记（关键！）
+                await Task.Delay(50);
+                var eofMarker = new byte[] { 0x00, 0x45, 0x4F, 0x46, 0x0A };
+                await _connectedPeripheral!
+                    .WriteCharacteristic(_writeServiceUuid, _writeCharacteristicUuid, eofMarker)
+                    .FirstAsync();
+
+                _logger.LogInformation("BLE: 已发送 EOF 标记，触发 ESP32 显示");
 
                 return true;
             }
@@ -532,19 +847,9 @@ public class ShinyBleService : IBleService
 
     public async Task<ObservableCollection<BleDeviceInfo>> ScanDevicesAsync()
     {
-        // 请求蓝牙权限
-        try
+        if (!await EnsureBleAccessAsync())
         {
-            var access = await _bleManager.RequestAccess().FirstAsync();
-            if (access != AccessState.Available)
-            {
-                _logger.LogWarning($"BLE: 权限请求失败 - {access}");
-                return new ObservableCollection<BleDeviceInfo>();
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError($"BLE: 权限请求错误 - {ex.Message}");
+            _logger.LogWarning($"BLE: 权限请求失败");
             return new ObservableCollection<BleDeviceInfo>();
         }
 

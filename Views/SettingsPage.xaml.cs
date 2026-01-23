@@ -16,6 +16,10 @@ public partial class SettingsPage : ContentPage
         InitializeComponent();
         _bleService = bleService;
         DeviceListView.ItemsSource = _devices;
+        
+        // 订阅连接状态变化事件
+        _bleService.ConnectionStateChanged += OnConnectionStateChanged;
+        
         LoadSavedDevice();
     }
 
@@ -24,6 +28,33 @@ public partial class SettingsPage : ContentPage
         base.OnAppearing();
         UpdateConnectionStatus();
         LoadSavedDevice();
+    }
+    
+    protected override void OnDisappearing()
+    {
+        base.OnDisappearing();
+        // 注意：这里不取消订阅，因为我们希望在页面不可见时也能接收状态变化
+    }
+    
+    /// <summary>
+    /// 处理连接状态变化事件
+    /// </summary>
+    private void OnConnectionStateChanged(object? sender, ConnectionStateChangedEventArgs e)
+    {
+        // 已在主线程上，直接更新 UI
+        UpdateConnectionStatus();
+        
+        if (e.IsConnected)
+        {
+            DeviceListView.IsVisible = false;
+            LoadSavedDevice();
+            System.Diagnostics.Debug.WriteLine($"BLE: 连接状态变化 - 已连接到 {e.DeviceName}，原因: {e.Reason}");
+        }
+        else
+        {
+            LoadSavedDevice();
+            System.Diagnostics.Debug.WriteLine($"BLE: 连接状态变化 - 已断开 {e.DeviceName}，原因: {e.Reason}");
+        }
     }
 
     private void UpdateConnectionStatus()
@@ -50,30 +81,10 @@ public partial class SettingsPage : ContentPage
             SavedDeviceFrame.IsVisible = true;
             SavedDeviceMac.Text = $"MAC: {macAddress}";
             SavedDeviceName.Text = "已保存的设备";
-
-            // 自动连接已保存的设备
-            await ConnectToSavedDevice(macAddress);
         }
         else
         {
             SavedDeviceFrame.IsVisible = false;
-        }
-    }
-
-    private async Task ConnectToSavedDevice(string macAddress)
-    {
-        try
-        {
-            var connected = await _bleService.ConnectAsync(macAddress, macAddress);
-            if (connected)
-            {
-                UpdateConnectionStatus();
-                await DisplayAlertAsync("提示", "自动连接成功", "确定");
-            }
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"Auto connect failed: {ex.Message}");
         }
     }
 
@@ -216,12 +227,7 @@ public partial class SettingsPage : ContentPage
                 
                 if (connected)
                 {
-                    // 等待一下确保状态已更新
-                    await Task.Delay(500);
-                    
-                    DeviceListView.IsVisible = false;
-                    UpdateConnectionStatus();
-                    LoadSavedDevice();
+                    // UI 更新由 ConnectionStateChanged 事件处理
                     await DisplayAlertAsync("成功", $"已连接到 {device.Name}", "确定");
                 }
                 else
@@ -248,8 +254,7 @@ public partial class SettingsPage : ContentPage
         if (result)
         {
             await _bleService.DeleteSavedMacAddress();
-            SavedDeviceFrame.IsVisible = false;
-            UpdateConnectionStatus();
+            // UI 更新由 ConnectionStateChanged 事件处理
             await DisplayAlertAsync("提示", "已删除", "确定");
         }
     }

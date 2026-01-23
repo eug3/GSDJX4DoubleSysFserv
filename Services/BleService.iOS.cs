@@ -20,7 +20,10 @@ public class BleServiceApple : IBleService
     private ObservableCollection<BleDeviceInfo>? _scannedDevices;
     private bool _shouldAutoReconnect = true;
 
+#pragma warning disable CS0067
     public event EventHandler<ButtonEventArgs>? ButtonPressed;
+    public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
+#pragma warning restore CS0067
 
     public bool IsConnected { get; private set; }
     public string? ConnectedDeviceName { get; private set; }
@@ -138,13 +141,26 @@ public class BleServiceApple : IBleService
         IsConnected = true;
         ConnectedDeviceName = peripheral.Name ?? "未知设备";
         System.Diagnostics.Debug.WriteLine($"BLE: 已连接到 {ConnectedDeviceName}");
+        
+        // 触发连接状态变化事件
+        MainThread.BeginInvokeOnMainThread(() =>
+        {
+            ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(true, ConnectedDeviceName, ConnectionChangeReason.UserInitiated));
+        });
     }
 
     private void OnDisconnectedPeripheral(CBPeripheral peripheral, NSError? error)
     {
+        var previousDeviceName = ConnectedDeviceName;
         IsConnected = false;
         ConnectedDeviceName = null;
         System.Diagnostics.Debug.WriteLine($"BLE: 已断开连接 - {error?.LocalizedDescription}");
+        
+        // 触发连接状态变化事件
+        MainThread.BeginInvokeOnMainThread(() =>
+        {
+            ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(false, previousDeviceName, ConnectionChangeReason.DeviceDisconnected));
+        });
         
         // 后台自动重连
         if (_shouldAutoReconnect && _connectedPeripheral != null)
@@ -232,8 +248,64 @@ public class BleServiceApple : IBleService
         }
     }
 
-    // 兼容接口的占位实现（当前 iOS 端未发送数据，也未做启动自连）
-    public Task TryAutoConnectOnStartupAsync() => Task.CompletedTask;
+    /// <summary>
+    /// 启动时尝试自动连接已保存的设备
+    /// </summary>
+    public async Task TryAutoConnectOnStartupAsync()
+    {
+        try
+        {
+            var savedDeviceId = await GetSavedMacAddress();
+            if (string.IsNullOrEmpty(savedDeviceId))
+            {
+                System.Diagnostics.Debug.WriteLine("BLE iOS: 没有保存的设备");
+                return;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"BLE iOS: 启动时尝试自动连接设备 {savedDeviceId}");
+
+            // 等待蓝牙就绪
+            while (_centralManager?.State != CBManagerState.PoweredOn)
+            {
+                await Task.Delay(100);
+                System.Diagnostics.Debug.WriteLine($"BLE iOS: 等待蓝牙就绪... 状态: {_centralManager?.State}");
+            }
+
+            // 先尝试直接从已发现的设备中查找
+            if (_discoveredPeripherals.TryGetValue(savedDeviceId, out var peripheral))
+            {
+                System.Diagnostics.Debug.WriteLine($"BLE iOS: 在已发现设备中找到目标设备");
+                _connectedPeripheral = peripheral;
+                _centralManager?.ConnectPeripheral(peripheral, new PeripheralConnectionOptions
+                {
+                    NotifyOnConnection = true,
+                    NotifyOnDisconnection = true,
+                    NotifyOnNotification = true
+                });
+                return;
+            }
+
+            // 如果没找到，扫描查找
+            System.Diagnostics.Debug.WriteLine("BLE iOS: 未在缓存中找到设备，开始扫描...");
+            
+            var devices = await ScanDevicesAsync();
+            var targetDevice = devices.FirstOrDefault(d => d.Id == savedDeviceId);
+
+            if (targetDevice != null)
+            {
+                System.Diagnostics.Debug.WriteLine($"BLE iOS: 在扫描结果中找到目标设备 {targetDevice.Name}");
+                await ConnectAsync(savedDeviceId, savedDeviceId);
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine($"BLE iOS: 未找到保存的设备 {savedDeviceId}");
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"BLE iOS: 启动时自动连接失败 - {ex.Message}");
+        }
+    }
 
     public Task<bool> SendTextToDeviceAsync(string text, int chapter = 0)
     {
