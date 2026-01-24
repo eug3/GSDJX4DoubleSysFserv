@@ -3,40 +3,8 @@ using System.Text;
 
 namespace GSDJX4DoubleSysFserv.Services;
 
-/// <summary>
-/// X4IM v2 协议实现
-/// 
-/// 协议格式 (ESP32 端当前解析的 v2 帧头，32 字节):
-///   magic (4B)   = "X4IM"
-///   version (1B) = 0x02
-///   type   (1B)  = 文件类型（BMP/JPG/TXT 等）
-///   flags  (2B)  = 文件标志位（如 TXT=0x0004, BMP=0x0020）
-///   payload_size (4B, LE) = 数据大小（不含 EOF）
-///   sd/seq (4B, LE)       = 固件当前用于存储/序号，保留 0 即可
-///   name (16B)            = UTF-8 文件名/书籍 ID（最多 15B，\0 结尾）
-/// 
-/// 数据部分:
-///   直接发送原始数据（TXT文本等）
-///   可以分多次发送，ESP32 会自动拼接
-///   payload_size 不包含 EOF 标记大小
-/// 
-/// EOF 标记（仅用于 TXT）:
-///   传输完成后单独发送：0x00 0x45 0x4F 0x46 0x0A (\x00EOF\n)
-///   或缩短版：0x00 0x45 0x4F 0x46 (\x00EOF，不含 \n)
-///   ESP32 根据这个标记触发文件显示（BMP/PNG 不需要 EOF）
-/// </summary>
 public static class X4IMProtocol
 {
-    // 文件类型常量
-    public const byte TYPE_BMP = 0x01;
-    public const byte TYPE_PNG = 0x02;
-    public const byte TYPE_JPG = 0x03;
-    public const byte TYPE_JPEG = 0x04;
-    public const byte TYPE_TXT = 0x10;
-    public const byte TYPE_EPUB = 0x11;
-    public const byte TYPE_PDF = 0x12;
-    public const byte TYPE_BINARY = 0x7F;
-
     // 标志位定义
     public const ushort FLAG_STORAGE_SD = 0x0100;
     public const ushort FLAG_STORAGE_LITTLEFS = 0x0000;
@@ -92,9 +60,9 @@ public static class X4IMProtocol
         header[2] = 0x49;
         header[3] = 0x4D;
 
-        // Version + Type（保持与 ESP32 解析一致: version 在 [4]，type 在 [5]）
+        // Version + Type（type 固定为 0x00，与 ESP32 和 main.js 对齐）
         header[4] = 0x02;
-        header[5] = FlagsToType(flags);
+        header[5] = 0x00;
 
         // Flags（小端序）
         header[6] = (byte)(flags & 0xFF);
@@ -167,16 +135,68 @@ public static class X4IMProtocol
     }
 
     /// <summary>
-    /// 从 flags 推导协议 type 字节（保持与 ESP32 侧一致）。
+    /// 创建图片帧头（BMP/PNG/JPG 等）- 确保使用正确的图片类型，不使用 TXT 类型
     /// </summary>
-    private static byte FlagsToType(ushort flags)
+    /// <param name="imageData">图片二进制数据</param>
+    /// <param name="fileName">文件名（如 page_0.png, qr.bmp）</param>
+    /// <param name="imageFlags">图片类型标志（如 FLAG_TYPE_PNG, FLAG_TYPE_BMP）</param>
+    /// <param name="sd">存储标识：0=littlefs, 1=SD卡</param>
+    /// <returns>包含帧头和部分数据的第一个分片</returns>
+    public static byte[] CreateImageHeader(int imageSize, string fileName = "page_0.bmp", ushort imageFlags = FLAG_TYPE_BMP, uint sd = 0)
     {
-        if ((flags & FLAG_TYPE_BMP) != 0) return TYPE_BMP;
-        if ((flags & FLAG_TYPE_PNG) != 0) return TYPE_PNG;
-        if ((flags & FLAG_TYPE_JPG) != 0) return TYPE_JPG;
-        if ((flags & FLAG_TYPE_TXT) != 0) return TYPE_TXT;
-        if ((flags & FLAG_TYPE_EPUB) != 0) return TYPE_EPUB;
-        if ((flags & FLAG_TYPE_PDF) != 0) return TYPE_PDF;
-        return TYPE_BINARY;
+        // 确保不是 TXT 类型
+        if (imageFlags == FLAG_TYPE_TXT)
+        {
+            throw new ArgumentException("图片不应使用 TXT 类型标志！请使用 FLAG_TYPE_PNG/BMP/JPG 等");
+        }
+
+        return CreateHeader((uint)imageSize, fileName, sd, imageFlags);
+    }
+
+    /// <summary>
+    /// 分片图片数据（用于 BLE 分包传输，MTU 512 字节）
+    /// 第一个分片包含 32 字节帧头 + 480 字节数据；BMP 传输完成后需发送 SHOW_PAGE 命令触发显示（无需 EOF）。
+    /// 后续分片为纯数据，每片最多 512 字节
+    /// </summary>
+    public static List<byte[]> ChunkImageData(byte[] imageData, ushort imageFlags = FLAG_TYPE_BMP, string fileName = "page_0.bmp", uint sd = 0, int mtu = 512)
+    {
+        var chunks = new List<byte[]>();
+
+        // 确保不是 TXT 类型
+        if (imageFlags == FLAG_TYPE_TXT)
+        {
+            throw new ArgumentException("图片不应使用 TXT 类型标志！请使用 FLAG_TYPE_PNG/BMP/JPG 等");
+        }
+
+        var header = CreateImageHeader(imageData.Length, fileName, imageFlags, sd);
+
+        // 第一个分片：帧头 + 部分数据（MTU 512 = 32 header + 480 data）
+        int firstChunkDataSize = Math.Min(mtu - 32, imageData.Length);
+        var firstChunk = new byte[32 + firstChunkDataSize];
+        Array.Copy(header, 0, firstChunk, 0, 32);
+        Array.Copy(imageData, 0, firstChunk, 32, firstChunkDataSize);
+        chunks.Add(firstChunk);
+
+        // 后续分片：纯数据（每片最多 MTU 字节）
+        int offset = firstChunkDataSize;
+        while (offset < imageData.Length)
+        {
+            int remainingSize = imageData.Length - offset;
+            int currentChunkSize = Math.Min(mtu, remainingSize);
+            var chunk = new byte[currentChunkSize];
+            Array.Copy(imageData, offset, chunk, 0, currentChunkSize);
+            chunks.Add(chunk);
+            offset += currentChunkSize;
+        }
+
+        return chunks;
+    }
+
+    /// <summary>
+    /// 构造 SHOW_PAGE 命令负载（BMP/图片传输完成后调用以触发显示）
+    /// </summary>
+    public static byte[] CreateShowPageCommand(byte pageIndex = 0)
+    {
+        return new byte[] { CMD_SHOW_PAGE, pageIndex };
     }
 }

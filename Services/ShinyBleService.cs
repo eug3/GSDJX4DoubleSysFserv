@@ -12,13 +12,12 @@ using UIKit;
 namespace GSDJX4DoubleSysFserv.Services;
 
 /// <summary>
-/// 基于 Shiny.NET 3.x 的蓝牙服务 - 支持后台持久化
+/// 基于 Shiny.NET 3.x 的蓝牙服务 - 统一跨平台 BLE 通信
 /// 
-/// 架构说明：
-/// - ShinyBleService: 前台服务层，处理 UI 请求（扫描、连接、发送数据）
-/// - ShinyBleDelegate: 后台委托，处理后台事件（设备断开重连、通知接收）
-/// 
-/// 两者通过静态事件通信，确保后台事件能够正确更新服务状态
+/// 关键特性：
+/// 1. 统一 iOS/Android 平台逻辑
+/// 2. 使用系统自动协商的 MTU
+/// 3. 保持与 main.js 相同的 512 字节 payload 策略
 /// </summary>
 public class ShinyBleService : IBleService
 {
@@ -29,8 +28,9 @@ public class ShinyBleService : IBleService
     private const string SavedMacKey = "Ble_SavedMacAddress";
 
     private IPeripheral? _connectedPeripheral;
-    private string? _writeServiceUuid;          // 缓存写入服务 UUID
-    private string? _writeCharacteristicUuid;   // 缓存写入特征 UUID
+    private string? _writeServiceUuid;
+    private string? _writeCharacteristicUuid;
+    private int _negotiatedMtu = 23; // BLE 默认值是 23 字节（20 + 3 ATT header）
     private ObservableCollection<BleDeviceInfo>? _scannedDevices;
     private readonly Dictionary<string, IPeripheral> _discoveredPeripherals = new();
     private TaskCompletionSource<ObservableCollection<BleDeviceInfo>>? _scanTcs;
@@ -44,15 +44,12 @@ public class ShinyBleService : IBleService
         { X4IMProtocol.CMD_SHOW_PAGE, "OK" }
     };
     
-    // 防重复处理：记录最后处理的按键和时间戳
+    // 防重复处理
     private string? _lastProcessedKey;
     private DateTime _lastProcessedTime = DateTime.MinValue;
-    private readonly TimeSpan _debounceInterval = TimeSpan.FromMilliseconds(500); // 500ms 防抖
+    private readonly TimeSpan _debounceInterval = TimeSpan.FromMilliseconds(500);
     
-    // 按键事件
     public event EventHandler<ButtonEventArgs>? ButtonPressed;
-    
-    // 连接状态变化事件
     public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
 
     public bool IsConnected { get; private set; }
@@ -65,38 +62,23 @@ public class ShinyBleService : IBleService
         _logger = logger;
         _weReadService = weReadService;
         
-        // 订阅后台委托的事件
         SubscribeToBackgroundDelegateEvents();
-
-        // 后台初始化阅读状态（无需 UI 即可工作）
         _ = _weReadService.LoadStateAsync();
     }
 
-    /// <summary>
-    /// 订阅 ShinyBleDelegate 的后台事件
-    /// </summary>
     private void SubscribeToBackgroundDelegateEvents()
     {
-        // 后台连接成功事件
         ShinyBleDelegate.PeripheralConnectedInBackground += OnPeripheralConnectedInBackground;
-        
-        // 后台断开事件
         ShinyBleDelegate.PeripheralDisconnectedInBackground += OnPeripheralDisconnectedInBackground;
-        
-        // 后台通知事件
         ShinyBleDelegate.NotificationReceivedInBackground += OnNotificationReceivedInBackground;
         
         _logger.LogInformation("BLE Service: 已订阅后台委托事件");
     }
 
-    /// <summary>
-    /// 处理后台连接成功事件
-    /// </summary>
     private async void OnPeripheralConnectedInBackground(object? sender, BlePeripheralEventArgs e)
     {
         _logger.LogInformation($"BLE Service: 收到后台连接事件 - {e.Peripheral.Name}");
         
-        // 检查是否是我们保存的设备
         var savedDeviceId = await GetSavedMacAddress();
         if (savedDeviceId == e.Peripheral.Uuid)
         {
@@ -104,24 +86,17 @@ public class ShinyBleService : IBleService
             IsConnected = true;
             ConnectedDeviceName = e.Peripheral.Name ?? "未知设备";
             
-            // 缓存写入特征
             await CacheWriteCharacteristicAsync();
-            
-            // 通知 UI 层
             NotifyConnectionStateChanged(true, ConnectedDeviceName, ConnectionChangeReason.AutoReconnect);
             
             _logger.LogInformation($"BLE Service: 后台重连成功 - {ConnectedDeviceName}");
         }
     }
 
-    /// <summary>
-    /// 处理后台断开事件
-    /// </summary>
     private async void OnPeripheralDisconnectedInBackground(object? sender, BlePeripheralEventArgs e)
     {
         _logger.LogInformation($"BLE Service: 收到后台断开事件 - {e.Peripheral.Name}");
         
-        // 检查是否是当前连接的设备
         var savedDeviceId = await GetSavedMacAddress();
         if (savedDeviceId == e.Peripheral.Uuid && IsConnected)
         {
@@ -129,25 +104,47 @@ public class ShinyBleService : IBleService
             IsConnected = false;
             _writeServiceUuid = null;
             _writeCharacteristicUuid = null;
+            _negotiatedMtu = 23; // BLE 默认值，系统会自行协商
             
-            // 通知 UI 层
             NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.DeviceDisconnected);
             
             _logger.LogWarning($"BLE Service: 后台设备断开 - {previousDeviceName}");
         }
     }
 
-    /// <summary>
-    /// 处理后台通知事件
-    /// </summary>
     private void OnNotificationReceivedInBackground(object? sender, BleNotificationEventArgs e)
     {
         HandleNotification(e.Data, e.Message, "后台");
     }
 
     /// <summary>
-    /// 启动时尝试自动连接已保存的设备
+    /// MTU 协商
+    /// Android 使用 TryRequestMtuAsync 请求更大 MTU，iOS 系统会自动协商
     /// </summary>
+    private async void NegotiateMtuAsync()
+    {
+        if (_connectedPeripheral == null)
+        {
+            _logger.LogWarning("BLE: 设备未连接，无法请求 MTU");
+            return;
+        }
+
+#if ANDROID
+        try
+        {
+            _logger.LogInformation("BLE: Android 请求 MTU 517...");
+            var result = await _connectedPeripheral.TryRequestMtuAsync(517);
+            _logger.LogInformation($"BLE: Android MTU 请求结果 = {result}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning($"BLE: Android MTU 请求失败 - {ex.Message}");
+        }
+#else
+        _logger.LogInformation($"BLE: iOS MTU 使用系统协商值（默认 {_negotiatedMtu} 字节）");
+#endif
+    }
+
     public async Task TryAutoConnectOnStartupAsync()
     {
         try
@@ -159,7 +156,6 @@ public class ShinyBleService : IBleService
                 return;
             }
 
-            // 检查是否是旧版 MAC 地址格式（包含冒号），如果是则清除旧数据
             if (savedDeviceId.Contains(":"))
             {
                 _logger.LogInformation($"BLE: 检测到旧版 MAC 地址格式 ({savedDeviceId})，将使用新 UUID 格式重新配对");
@@ -176,9 +172,6 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 确保有蓝牙访问权限（先检查再请求，避免重复弹窗）
-    /// </summary>
     private async Task<bool> EnsureBleAccessAsync()
     {
         try
@@ -193,9 +186,6 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 扫描并连接到已保存的设备
-    /// </summary>
     private async Task ScanAndConnectToSavedDeviceAsync()
     {
         var savedDeviceId = await GetSavedMacAddress();
@@ -223,7 +213,6 @@ public class ShinyBleService : IBleService
                         var peripheral = scanResult.Peripheral;
                         var deviceId = peripheral.Uuid;
 
-                        // 过滤掉没有名字的设备
                         if (string.IsNullOrWhiteSpace(peripheral.Name))
                         {
                             return;
@@ -254,7 +243,6 @@ public class ShinyBleService : IBleService
                     }
                 );
 
-            // 15秒后停止扫描
             await Task.Delay(15000);
             if (!found)
             {
@@ -286,11 +274,11 @@ public class ShinyBleService : IBleService
         
         await _storageService.RemoveAsync(SavedMacKey);
         
-        // 断开连接但不触发 UserDisconnected 事件
         _notifySubscription?.Dispose();
         _notifySubscription = null;
         _writeServiceUuid = null;
         _writeCharacteristicUuid = null;
+        _negotiatedMtu = 23; // BLE 默认值，系统会自行协商
 
         if (_connectedPeripheral != null)
         {
@@ -302,7 +290,6 @@ public class ShinyBleService : IBleService
         ConnectedDeviceName = null;
         _logger.LogInformation("BLE: 已删除保存的设备并断开连接");
         
-        // 只有之前已连接时才触发事件
         if (wasConnected)
         {
             NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.DeviceDeleted);
@@ -319,10 +306,8 @@ public class ShinyBleService : IBleService
             }
             else
             {
-                // 设备不在已发现列表中，先扫描查找
                 _logger.LogWarning($"BLE: 未在缓存中找到设备 {deviceId}，开始扫描...");
                 
-                // 扫描并查找目标设备
                 var foundDevice = await ScanForDeviceAsync(deviceId);
                 if (foundDevice != null)
                 {
@@ -340,9 +325,6 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 扫描查找指定设备
-    /// </summary>
     private async Task<IPeripheral?> ScanForDeviceAsync(string targetDeviceId)
     {
         try
@@ -365,7 +347,6 @@ public class ShinyBleService : IBleService
                     {
                         var peripheral = scanResult.Peripheral;
 
-                        // 过滤掉没有名字的设备
                         if (string.IsNullOrWhiteSpace(peripheral.Name))
                         {
                             return;
@@ -394,7 +375,6 @@ public class ShinyBleService : IBleService
                     }
                 );
 
-            // 最多扫描 10 秒
             var timeoutTask = Task.Delay(10000);
             var completedTask = await Task.WhenAny(scanCompletion.Task, timeoutTask);
             
@@ -414,9 +394,6 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 连接到外设
-    /// </summary>
     private async Task<bool> ConnectToPeripheralAsync(IPeripheral peripheral, string deviceId)
     {
         try
@@ -424,10 +401,10 @@ public class ShinyBleService : IBleService
             _connectedPeripheral = peripheral;
             _writeServiceUuid = null;
             _writeCharacteristicUuid = null;
+            _negotiatedMtu = 23; // BLE 默认值，系统会自行协商
 
             _logger.LogInformation($"BLE: 开始连接到 {peripheral.Name ?? "未知设备"}...");
 
-            // Shiny 3.x: 使用 WhenStatusChanged() 等待连接
             var connectTask = peripheral
                 .WhenStatusChanged()
                 .Where(x => x == ConnectionState.Connected)
@@ -435,7 +412,6 @@ public class ShinyBleService : IBleService
                 .Timeout(TimeSpan.FromSeconds(15))
                 .FirstAsync();
 
-            // 连接配置：AutoConnect=true 支持后台自动重连
             peripheral.Connect(new ConnectionConfig
             {
                 AutoConnect = true
@@ -446,19 +422,15 @@ public class ShinyBleService : IBleService
             ConnectedDeviceName = peripheral.Name ?? "未知设备";
             _logger.LogInformation($"BLE: 已连接到 {ConnectedDeviceName}");
 
-            // 触发连接状态变化事件
             NotifyConnectionStateChanged(true, ConnectedDeviceName, ConnectionChangeReason.UserInitiated);
 
-            // 缓存写入特征值以提升性能
             await CacheWriteCharacteristicAsync();
-
-            // 订阅通知特征（当前固件暂无通知，保持兼容占位）
             await SubscribeToNotificationsAsync();
-
-            // 监听断开事件
             SetupDisconnectionHandler();
 
-            // 保存设备 UUID（用于后续自动连接）
+            // 协商 MTU
+            NegotiateMtuAsync();
+
             var peripheralUuid = peripheral.Uuid;
             _logger.LogInformation($"BLE: 保存设备 UUID: {peripheralUuid}");
             await SaveMacAddress(peripheralUuid);
@@ -474,9 +446,6 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 设置断开连接处理器
-    /// </summary>
     private void SetupDisconnectionHandler()
     {
         if (_connectedPeripheral == null) return;
@@ -490,14 +459,13 @@ public class ShinyBleService : IBleService
                 _logger.LogWarning($"BLE: 设备 {previousDeviceName} 已断开");
                 IsConnected = false;
                 _writeServiceUuid = null;
-                _writeCharacteristicUuid = null; // 清空缓存的特征值，防止重连后使用旧句柄
+                _writeCharacteristicUuid = null;
+                _negotiatedMtu = 23; // BLE 默认值，系统会自行协商
                 _notifySubscription?.Dispose();
                 _notifySubscription = null;
                 
-                // 触发连接状态变化事件
                 NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.DeviceDisconnected);
                 
-                // 尝试自动重连
                 MainThread.BeginInvokeOnMainThread(async () =>
                 {
                     await Task.Delay(2000);
@@ -510,9 +478,6 @@ public class ShinyBleService : IBleService
             });
     }
 
-    /// <summary>
-    /// 订阅通知特征（接收设备按键事件）- 动态发现方式
-    /// </summary>
     private async Task SubscribeToNotificationsAsync()
     {
         if (_connectedPeripheral == null) return;
@@ -521,22 +486,19 @@ public class ShinyBleService : IBleService
         {
             _notifySubscription?.Dispose();
 
-            // 获取所有特征并查找具有 Notify 属性的特征
             var allCharacteristics = await _connectedPeripheral
                 .GetAllCharacteristics()
                 .FirstAsync();
 
             _logger.LogInformation($"BLE: 搜索可通知特征，共 {allCharacteristics.Count} 个特征");
 
-            // 排除标准服务
             static bool IsExcludedService(string uuid)
             {
                 var u = uuid.ToLowerInvariant();
-                return u == "00001800-0000-1000-8000-00805f9b34fb" // Generic Access
-                    || u == "00001801-0000-1000-8000-00805f9b34fb"; // Generic Attribute
+                return u == "00001800-0000-1000-8000-00805f9b34fb"
+                    || u == "00001801-0000-1000-8000-00805f9b34fb";
             }
 
-            // 查找具有 Notify 属性的特征
             var notifyChar = allCharacteristics.FirstOrDefault(ch =>
                 !IsExcludedService(ch.Service.Uuid) &&
                 (ch.Properties.HasFlag(CharacteristicProperties.Notify) ||
@@ -546,7 +508,6 @@ public class ShinyBleService : IBleService
             {
                 _logger.LogInformation($"BLE: ✅ 找到可通知特征: {notifyChar.Uuid} @ 服务 {notifyChar.Service.Uuid}");
 
-                // 订阅通知
                 _notifySubscription = _connectedPeripheral
                     .NotifyCharacteristic(
                         notifyChar.Service.Uuid,
@@ -575,21 +536,13 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 处理设备通知数据
-    /// </summary>
     private void ProcessNotification(byte[] data)
     {
         HandleNotification(data, null, "前台");
     }
 
-    /// <summary>
-    /// 统一处理按键事件（自动翻页并获取内容发送到设备）
-    /// 此方法由 UI 或后台调用，确保不会重复执行
-    /// </summary>
     public async Task ProcessButtonAsync(string key)
     {
-        // 防重复检查：如果在防抖时间窗口内收到相同按键，直接忽略
         lock (this)
         {
             var now = DateTime.UtcNow;
@@ -607,13 +560,11 @@ public class ShinyBleService : IBleService
         try
         {
 #if IOS
-            // 在 iOS 上开启后台任务，确保网络请求与 BLE 写入可在后台完成
             nint bgTaskId = 0;
             try
             {
                 bgTaskId = UIApplication.SharedApplication.BeginBackgroundTask("BLEPageTurn", () => { });
 #endif
-            // 处理 RIGHT/LEFT 翻页；OK/ENTER 刷新当前内容
             if ((key != "RIGHT" && key != "LEFT" && key != "OK" && key != "ENTER") ||
                 !IsConnected ||
                 string.IsNullOrEmpty(_weReadService.State.CurrentUrl))
@@ -624,7 +575,6 @@ public class ShinyBleService : IBleService
             string content = string.Empty;
             if (key == "OK" || key == "ENTER")
             {
-                // 设备请求刷新：直接发送最后一次成功内容（走缓存）
                 content = _weReadService.State.LastText;
                 if (string.IsNullOrEmpty(content))
                 {
@@ -647,7 +597,7 @@ public class ShinyBleService : IBleService
                     content = cached ?? string.Empty;
                 }
             }
-            else // LEFT
+            else
             {
                 _logger.LogInformation($"🔄 处理按键：获取上一章");
                 try
@@ -662,7 +612,6 @@ public class ShinyBleService : IBleService
                 }
             }
 
-            // 自动发送到设备
             if (!string.IsNullOrEmpty(content))
             {
                 _logger.LogInformation($"📤 发送内容到 EPD ({content.Length} 字符)");
@@ -691,9 +640,6 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 更新阅读上下文（URL 与 Cookie），并持久化
-    /// </summary>
     public async Task UpdateReadingContextAsync(string url, string cookie)
     {
         try
@@ -722,10 +668,8 @@ public class ShinyBleService : IBleService
             {
                 _logger.LogInformation($"✅ 映射到按键事件: {key}");
 
-                // 触发 UI 层的按键事件（仅用于更新状态显示）
                 ButtonPressed?.Invoke(this, new ButtonEventArgs(key));
 
-                // 调用统一的按键处理方法（后台翻页 + 发送到设备）
                 _ = ProcessButtonAsync(key);
 
                 return;
@@ -767,14 +711,12 @@ public class ShinyBleService : IBleService
         {
             var normalized = message.Trim().ToUpperInvariant();
 
-            // 文本协议：BTN:LEFT, BTN:RIGHT 等
             if (normalized.StartsWith("BTN:"))
             {
                 key = normalized.Substring(4);
                 return true;
             }
 
-            // 别名映射：NEXT_PAGE → RIGHT, PREV_PAGE → LEFT
             if (normalized is "NEXT_PAGE" or "NEXT" or "PAGE_NEXT" or "RIGHT")
             {
                 key = "RIGHT";
@@ -806,7 +748,6 @@ public class ShinyBleService : IBleService
             }
         }
 
-        // 二进制协议：直接映射命令字节（如 0x81=NEXT_PAGE → RIGHT）
         if (data.Length > 0 && CommandButtonMap.TryGetValue(data[0], out var mapped))
         {
             _logger.LogInformation($"   命令字节映射: 0x{data[0]:X2} → {mapped}");
@@ -825,6 +766,7 @@ public class ShinyBleService : IBleService
         _notifySubscription = null;
         _writeServiceUuid = null;
         _writeCharacteristicUuid = null;
+        _negotiatedMtu = 23; // BLE 默认值，系统会自行协商
 
         if (_connectedPeripheral != null)
         {
@@ -836,13 +778,9 @@ public class ShinyBleService : IBleService
         ConnectedDeviceName = null;
         _logger.LogInformation("BLE: 已断开连接");
         
-        // 触发连接状态变化事件
         NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.UserDisconnected);
     }
 
-    /// <summary>
-    /// 通知连接状态变化
-    /// </summary>
     private void NotifyConnectionStateChanged(bool isConnected, string? deviceName, ConnectionChangeReason reason)
     {
         MainThread.BeginInvokeOnMainThread(() =>
@@ -851,9 +789,6 @@ public class ShinyBleService : IBleService
         });
     }
 
-    /// <summary>
-    /// 缓存写入特征值以提升性能
-    /// </summary>
     private async Task CacheWriteCharacteristicAsync()
     {
         if (_connectedPeripheral == null)
@@ -872,39 +807,31 @@ public class ShinyBleService : IBleService
 
             _logger.LogInformation($"BLE: 发现 {allCharacteristics.Count} 个特征值");
 
-            // 排除标准服务（0x1800/0x1801），避免误选 0x2B29 等系统特征
             static bool IsStandardBase(string uuid)
                 => uuid.EndsWith("-0000-1000-8000-00805f9b34fb", StringComparison.OrdinalIgnoreCase);
 
             static bool IsExcludedService(string uuid)
             {
                 var u = uuid.ToLowerInvariant();
-                return u == "00001800-0000-1000-8000-00805f9b34fb" // Generic Access
-                    || u == "00001801-0000-1000-8000-00805f9b34fb"; // Generic Attribute
+                return u == "00001800-0000-1000-8000-00805f9b34fb"
+                    || u == "00001801-0000-1000-8000-00805f9b34fb";
             }
 
             var knownServicePref = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
-                // Nordic UART Service
                 "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
-                // 常见透传服务
                 "0000ffe0-0000-1000-8000-00805f9b34fb",
                 "0000abf0-0000-1000-8000-00805f9b34fb",
-                // ESP-IDF 示例服务
                 "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
             };
 
             var knownCharPref = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
-                // NUS Write 特征
                 "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
-                // FFE1 常作透传特征
                 "0000ffe1-0000-1000-8000-00805f9b34fb",
-                // ESP-IDF 示例特征
                 "beb5483e-36e1-4688-b7f5-ea07361b26a8"
             };
 
-            // 计算候选评分并选择最佳
             var candidates = new List<(BleCharacteristicInfo ch, int score)>();
             foreach (var ch in allCharacteristics)
             {
@@ -916,25 +843,20 @@ public class ShinyBleService : IBleService
 
                 if (IsExcludedService(ch.Service.Uuid))
                 {
-                    // 丢弃 GA/GAtt 服务下的写特征（如 0x2B29）
                     _logger.LogDebug($"BLE: 排除系统服务可写特征 {ch.Uuid} @ {ch.Service.Uuid}");
                     continue;
                 }
 
                 var score = 0;
-                // 首选 Write Without Response（常见串口透传表现更稳定）
                 if (props.HasFlag(CharacteristicProperties.WriteWithoutResponse)) score += 120;
                 if (props.HasFlag(CharacteristicProperties.Write)) score += 80;
 
-                // 自定义 128-bit UUID 优先
                 if (!IsStandardBase(ch.Service.Uuid)) score += 60;
                 if (!IsStandardBase(ch.Uuid)) score += 20;
 
-                // 已知服务/特征额外加分
                 if (knownServicePref.Contains(ch.Service.Uuid)) score += 100;
                 if (knownCharPref.Contains(ch.Uuid)) score += 100;
 
-                // 避免选择 0x2Bxx 类系统特征
                 var chLower = ch.Uuid.ToLowerInvariant();
                 if (chLower.StartsWith("00002b") && IsStandardBase(ch.Uuid)) score -= 200;
 
@@ -947,7 +869,6 @@ public class ShinyBleService : IBleService
                 return;
             }
 
-            // 调试输出候选排序
             foreach (var c in candidates.OrderByDescending(x => x.score))
             {
                 _logger.LogInformation($"BLE: 候选写特征 score={c.score} svc={c.ch.Service.Uuid} ch={c.ch.Uuid} props={c.ch.Properties}");
@@ -967,16 +888,6 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 发送文本到设备（X4IM v2 协议 + EOF 标记）
-    /// </summary>
-    /// <remarks>
-    /// TXT 协议流程：
-    /// 1. 发送 X4IM v2 帧头（32B）+ TXT 数据（不含 EOF）
-    /// 2. 短暂延迟后，单独发送 EOF 标记（0x00 0x45 0x4F 0x46 0x0A）
-    /// 3. ESP32 接收到 EOF 时触发文件写入和显示
-    /// 注：帧头中的 payload_size 只表示 TXT 数据大小，不含 EOF
-    /// </remarks>
     public async Task<bool> SendTextToDeviceAsync(string text, int chapter = 0)
     {
         if (!IsConnected || _connectedPeripheral == null)
@@ -999,21 +910,19 @@ public class ShinyBleService : IBleService
             {
                 var data = Encoding.UTF8.GetBytes(text);
                 var bookId = $"weread_{chapter}";
-                var header = CreateX4IMv2Header(data.Length, 0, bookId, X4IMProtocol.FLAG_TYPE_TXT);
+                var header = X4IMProtocol.CreateHeader((uint)data.Length, bookId, 0, X4IMProtocol.FLAG_TYPE_TXT);
                 _logger.LogInformation($"BLE: 发送 TXT bookId=\"{bookId}\", size={data.Length} 字节");
 
-                // 步骤 1: 发送帧头 + 数据（不含 EOF）
+                // 按原应用行为：数据传完后再单独发送 EOF
                 var sent = await SendFrameAsync(header, data, appendEof: false);
                 if (!sent)
                 {
                     return false;
                 }
 
-                // 步骤 2: 发送 EOF 标记（单独发送）
                 await Task.Delay(50);
                 await SendEofAsync();
                 _logger.LogInformation($"BLE: TXT 传输完成，已发送 EOF 标记");
-
                 return true;
             }
             catch (Exception ex)
@@ -1033,9 +942,6 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 手动发送 EOF 标记到设备
-    /// </summary>
     public async Task<bool> SendEofAsync()
     {
         if (!IsConnected || _connectedPeripheral == null)
@@ -1058,7 +964,6 @@ public class ShinyBleService : IBleService
         try
         {
             _logger.LogInformation("BLE: 手动发送 EOF 标记");
-            // 历史实现：EOF 使用单次写入（非 blob）更可靠，ESP32 端据此触发显示
             await _connectedPeripheral
                 .WriteCharacteristic(_writeServiceUuid, _writeCharacteristicUuid, X4IMProtocol.EOF_MARKER)
                 .FirstOrDefaultAsync();
@@ -1073,10 +978,7 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 发送图片到设备（X4IM v2 协议，默认 PNG，不追加 EOF）
-    /// </summary>
-    public async Task<bool> SendImageToDeviceAsync(byte[] imageData, string fileName = "page_0.png", ushort flags = X4IMProtocol.FLAG_TYPE_PNG, bool sendShowPage = true, byte pageIndex = 0)
+    public async Task<bool> SendImageToDeviceAsync(byte[] imageData, string fileName = "page_0.bmp", ushort flags = X4IMProtocol.FLAG_TYPE_BMP, bool sendShowPage = true, byte pageIndex = 0)
     {
         if (!IsConnected || _connectedPeripheral == null)
         {
@@ -1090,10 +992,16 @@ public class ShinyBleService : IBleService
             return false;
         }
 
+        if (flags == X4IMProtocol.FLAG_TYPE_TXT)
+        {
+            _logger.LogError("BLE: 发送图片时不应使用 TXT 类型标志！");
+            return false;
+        }
+
         try
         {
-            var header = CreateX4IMv2Header(imageData.Length, 0, fileName, flags);
-            _logger.LogInformation($"BLE: 发送图片 file=\"{fileName}\" size={imageData.Length} 字节 flags=0x{flags:X4}");
+            var header = X4IMProtocol.CreateHeader((uint)imageData.Length, fileName, 0, flags);
+            _logger.LogInformation($"BLE: 发送图片 file=\"{fileName}\" size={imageData.Length} 字节 type=0x{header[5]:X2} flags=0x{flags:X4} (期望 BMP + 固定文件名)");
 
             var sent = await SendFrameAsync(header, imageData, appendEof: false);
             if (!sent)
@@ -1103,8 +1011,7 @@ public class ShinyBleService : IBleService
 
             if (sendShowPage)
             {
-                // 默认沿用 SHOW_PAGE 命令触发刷新
-                await SendCommandAsync(X4IMProtocol.CMD_SHOW_PAGE, new byte[] { pageIndex });
+                await SendCommandAsync(X4IMProtocol.CMD_SHOW_PAGE, X4IMProtocol.CreateShowPageCommand(pageIndex));
             }
 
             return true;
@@ -1116,75 +1023,8 @@ public class ShinyBleService : IBleService
         }
     }
 
-    /// <summary>
-    /// 创建 X4IM v2 协议帧头
-    /// </summary>
-    private static byte[] CreateX4IMv2Header(int payloadSize, int sd, string name, ushort flags = X4IMProtocol.FLAG_TYPE_TXT)
-    {
-        var header = new byte[32];
-
-        // Magic: "X4IM"
-        header[0] = 0x58; // 'X'
-        header[1] = 0x34; // '4'
-        header[2] = 0x49; // 'I'
-        header[3] = 0x4D; // 'M'
-
-        // Version (1字节) + Type (1字节)
-        header[4] = 0x02;
-        header[5] = FlagsToType(flags);
-
-        // Flags (小端序)
-        header[6] = (byte)(flags & 0xFF);
-        header[7] = (byte)((flags >> 8) & 0xFF);
-
-        // Payload size (小端序)
-        header[8] = (byte)(payloadSize & 0xFF);
-        header[9] = (byte)((payloadSize >> 8) & 0xFF);
-        header[10] = (byte)((payloadSize >> 16) & 0xFF);
-        header[11] = (byte)((payloadSize >> 24) & 0xFF);
-
-        // SD (小端序)
-        header[12] = (byte)(sd & 0xFF);
-        header[13] = (byte)((sd >> 8) & 0xFF);
-        header[14] = (byte)((sd >> 16) & 0xFF);
-        header[15] = (byte)((sd >> 24) & 0xFF);
-
-        // Name (最多 15 字节 + 1 字节结束符)
-        if (!string.IsNullOrEmpty(name))
-        {
-            var nameBytes = Encoding.UTF8.GetBytes(name);
-            var copyLen = Math.Min(nameBytes.Length, 15);
-            Array.Copy(nameBytes, 0, header, 16, copyLen);
-            header[16 + copyLen] = 0; // 结束符
-        }
-
-        return header;
-    }
-
-    /// <summary>
-    /// 从 flags 推导协议 type 字节（与 ESP32 侧对齐）
-    /// </summary>
-    private static byte FlagsToType(ushort flags)
-    {
-        if ((flags & X4IMProtocol.FLAG_TYPE_BMP) != 0) return X4IMProtocol.TYPE_BMP;
-        if ((flags & X4IMProtocol.FLAG_TYPE_PNG) != 0) return X4IMProtocol.TYPE_PNG;
-        if ((flags & X4IMProtocol.FLAG_TYPE_JPG) != 0) return X4IMProtocol.TYPE_JPG;
-        if ((flags & X4IMProtocol.FLAG_TYPE_TXT) != 0) return X4IMProtocol.TYPE_TXT;
-        if ((flags & X4IMProtocol.FLAG_TYPE_EPUB) != 0) return X4IMProtocol.TYPE_EPUB;
-        if ((flags & X4IMProtocol.FLAG_TYPE_PDF) != 0) return X4IMProtocol.TYPE_PDF;
-        return X4IMProtocol.TYPE_BINARY;
-    }
-
     private async Task<bool> SendFrameAsync(byte[] header, byte[] payload, bool appendEof)
     {
-        /// <remarks>
-        /// 发送 X4IM v2 帧（header + payload）到 BLE 设备。
-        /// 
-        /// 对于 TXT 文件：必须设置 appendEof=false，然后在此方法之后单独调用 SendEofAsync()
-        /// 对于 BMP/PNG 等：设置 appendEof=false（不需要 EOF），使用 SendCommandAsync(SHOW_PAGE) 代替
-        /// 
-        /// 注意：appendEof 参数已弃用，应始终为 false。EOF 必须单独发送以确保协议清晰性。
-        /// </remarks>
         if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
         {
             await CacheWriteCharacteristicAsync();
@@ -1196,67 +1036,87 @@ public class ShinyBleService : IBleService
             return false;
         }
 
-        // 使用 512 字节 MTU 分片传输（第一包 32B header + 最多 480B data，后续每包 512B）
+        const int HEADER_SIZE = 32;
         const int MTU = 512;
-        const int firstChunkDataSize = MTU - 32;
-        
-        var totalSize = header.Length + payload.Length;
-        if (appendEof)
+        const int FIRST_CHUNK_DATA_SIZE = MTU - HEADER_SIZE; // 480 字节
+
+        _logger.LogInformation($"BLE: X4IM v2 帧传输开始 (header[5]=0x{header[5]:X2}, payload={payload.Length}B, appendEof={appendEof})");
+
+        // ========== 策略与 main.js 对齐 ==========
+        // 第一个包：帧头(32) + 部分数据(480) = 512 字节
+        // 后续包：纯数据(最多 512 字节)
+        // 最后：可选 EOF 标记
+
+        try
         {
-            _logger.LogWarning("BLE: appendEof=true 已弃用！EOF 应单独通过 SendEofAsync() 发送");
-            totalSize += X4IMProtocol.EOF_MARKER.Length;
-        }
+            // 第一个包：帧头 + 部分数据
+            int firstDataSize = Math.Min(FIRST_CHUNK_DATA_SIZE, payload.Length);
+            var firstPacket = new byte[HEADER_SIZE + firstDataSize];
+            Array.Copy(header, 0, firstPacket, 0, HEADER_SIZE);
+            Array.Copy(payload, 0, firstPacket, HEADER_SIZE, firstDataSize);
 
-        using var ms = new MemoryStream(totalSize);
-        ms.Write(header, 0, header.Length);
-        ms.Write(payload, 0, payload.Length);
-
-        if (appendEof)
-        {
-            ms.Write(X4IMProtocol.EOF_MARKER, 0, X4IMProtocol.EOF_MARKER.Length);
-        }
-
-        ms.Position = 0;
-
-        // 第一包：帧头 + 部分数据（最多 512 字节）
-        var firstPacketSize = Math.Min(MTU, (int)ms.Length);
-        var firstPacket = new byte[firstPacketSize];
-        await ms.ReadAsync(firstPacket, 0, firstPacketSize);
-
-        using var firstMs = new MemoryStream(firstPacket);
-        await _connectedPeripheral
-            .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, firstMs, MTU)
-            .LastOrDefaultAsync();
-
-        _logger.LogDebug($"BLE: 已发送第一包 ({firstPacketSize} 字节)");
-
-        // 发送后续分片（每片 512 字节）
-        int chunkNum = 1;
-        while (ms.Position < ms.Length)
-        {
-            var remaining = (int)(ms.Length - ms.Position);
-            var chunkSize = Math.Min(MTU, remaining);
-            var chunk = new byte[chunkSize];
-            await ms.ReadAsync(chunk, 0, chunkSize);
-
-            using var chunkMs = new MemoryStream(chunk);
-            await _connectedPeripheral
-                .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, chunkMs, MTU)
-                .LastOrDefaultAsync();
-
-            chunkNum++;
-            if (chunkNum % 10 == 0 || ms.Position >= ms.Length)
+            using (var firstMs = new MemoryStream(firstPacket))
             {
-                var percent = (int)((ms.Position * 100) / ms.Length);
-                _logger.LogDebug($"BLE: 传输进度 {ms.Position}/{ms.Length} ({percent}%)");
+                await _connectedPeripheral
+                    .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, firstMs)
+                    .LastOrDefaultAsync();
+            }
+            _logger.LogInformation($"BLE: 已发送第一包 (32B 帧头 + {firstDataSize}B 数据 = {firstPacket.Length}B)");
+
+            // 后续包：纯数据（每包最多 MTU 字节）
+            int offset = firstDataSize;
+            int chunkNum = 1;
+
+            while (offset < payload.Length)
+            {
+                int remainingSize = payload.Length - offset;
+                int chunkSize = Math.Min(MTU, remainingSize);
+                var chunk = new byte[chunkSize];
+                Array.Copy(payload, offset, chunk, 0, chunkSize);
+
+                using (var chunkMs = new MemoryStream(chunk))
+                {
+                    await _connectedPeripheral
+                        .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, chunkMs)
+                        .LastOrDefaultAsync();
+                }
+
+                offset += chunkSize;
+                chunkNum++;
+
+                if (chunkNum % 5 == 0 || offset >= payload.Length)
+                {
+                    var percent = (int)((offset * 100) / payload.Length);
+                    _logger.LogDebug($"BLE: 数据传输进度 {offset}/{payload.Length} 字节 ({percent}%)");
+                }
+
+                await Task.Delay(10); // 节流
             }
 
-            await Task.Delay(10); // 节流
+            _logger.LogInformation($"BLE: 数据传输完成，共 {chunkNum} 个包，{payload.Length} 字节");
+
+            // 可选 EOF 标记
+            if (appendEof)
+            {
+                await Task.Delay(50); // 短暂延迟确保数据被处理
+                
+                using (var eofMs = new MemoryStream(X4IMProtocol.EOF_MARKER))
+                {
+                    await _connectedPeripheral
+                        .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, eofMs)
+                        .LastOrDefaultAsync();
+                }
+                _logger.LogInformation($"BLE: 已发送 EOF 标记 ({X4IMProtocol.EOF_MARKER.Length}B)，触发 ESP32 处理");
+            }
+
+            _logger.LogInformation($"BLE: ✅ 帧传输完成 (总 {HEADER_SIZE + payload.Length + (appendEof ? X4IMProtocol.EOF_MARKER.Length : 0)} 字节)");
+            return true;
         }
-
-        _logger.LogInformation($"BLE: 帧传输完成，共 {chunkNum} 个分片");
-
-        return true;
+        catch (Exception ex)
+        {
+            _logger.LogError($"BLE: 帧传输失败 - {ex.Message}");
+            return false;
+        }
     }
 
     private async Task<bool> SendCommandAsync(byte command, byte[]? payload = null)
@@ -1307,7 +1167,6 @@ public class ShinyBleService : IBleService
 
         _logger.LogInformation("BLE: 开始扫描...");
 
-        // Shiny 3.x: 使用 Scan 方法
         _scanSubscription = _bleManager
             .Scan()
             .Subscribe(
@@ -1316,7 +1175,6 @@ public class ShinyBleService : IBleService
                     var peripheral = scanResult.Peripheral;
                     var deviceId = peripheral.Uuid;
 
-                    // 过滤掉没有名字的设备
                     if (string.IsNullOrWhiteSpace(peripheral.Name))
                     {
                         return;
@@ -1347,7 +1205,6 @@ public class ShinyBleService : IBleService
                 }
             );
 
-        // 5秒后停止扫描
         _ = Task.Run(async () =>
         {
             await Task.Delay(5000);

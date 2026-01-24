@@ -311,9 +311,16 @@ public partial class WeReadPage : ContentPage
                 return;
             }
 
-            var sent = await _bleService.SendImageToDeviceAsync(bmpBytes, "page_0.bmp", X4IMProtocol.FLAG_TYPE_BMP, true, 0);
+            // 发送 BMP 图片（使用 BMP 类型标志，不使用 TXT）
+            var sent = await _bleService.SendImageToDeviceAsync(
+                bmpBytes, 
+                "page_0.bmp", 
+                X4IMProtocol.FLAG_TYPE_BMP,  // 确保使用 BMP 类型，不是 TXT
+                sendShowPage: true, 
+                pageIndex: 0
+            );
             System.Diagnostics.Debug.WriteLine(sent
-                ? $"WeRead: 已发送登录二维码到设备 ({bmpBytes.Length} 字节)"
+                ? $"WeRead: 已发送登录二维码到设备 ({bmpBytes.Length} 字节, 类型=BMP)"
                 : "WeRead: 发送登录二维码失败");
         }
         catch (Exception ex)
