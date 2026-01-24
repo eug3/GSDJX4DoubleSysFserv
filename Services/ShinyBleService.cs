@@ -1129,9 +1129,9 @@ public class ShinyBleService : IBleService
         header[2] = 0x49; // 'I'
         header[3] = 0x4D; // 'M'
 
-        // Version: 0x0002 (小端序)
+        // Version (1字节) + Type (1字节)
         header[4] = 0x02;
-        header[5] = 0x00;
+        header[5] = FlagsToType(flags);
 
         // Flags (小端序)
         header[6] = (byte)(flags & 0xFF);
@@ -1161,6 +1161,20 @@ public class ShinyBleService : IBleService
         return header;
     }
 
+    /// <summary>
+    /// 从 flags 推导协议 type 字节（与 ESP32 侧对齐）
+    /// </summary>
+    private static byte FlagsToType(ushort flags)
+    {
+        if ((flags & X4IMProtocol.FLAG_TYPE_BMP) != 0) return X4IMProtocol.TYPE_BMP;
+        if ((flags & X4IMProtocol.FLAG_TYPE_PNG) != 0) return X4IMProtocol.TYPE_PNG;
+        if ((flags & X4IMProtocol.FLAG_TYPE_JPG) != 0) return X4IMProtocol.TYPE_JPG;
+        if ((flags & X4IMProtocol.FLAG_TYPE_TXT) != 0) return X4IMProtocol.TYPE_TXT;
+        if ((flags & X4IMProtocol.FLAG_TYPE_EPUB) != 0) return X4IMProtocol.TYPE_EPUB;
+        if ((flags & X4IMProtocol.FLAG_TYPE_PDF) != 0) return X4IMProtocol.TYPE_PDF;
+        return X4IMProtocol.TYPE_BINARY;
+    }
+
     private async Task<bool> SendFrameAsync(byte[] header, byte[] payload, bool appendEof)
     {
         /// <remarks>
@@ -1182,21 +1196,65 @@ public class ShinyBleService : IBleService
             return false;
         }
 
-        using var ms = new MemoryStream();
+        // 使用 512 字节 MTU 分片传输（第一包 32B header + 最多 480B data，后续每包 512B）
+        const int MTU = 512;
+        const int firstChunkDataSize = MTU - 32;
+        
+        var totalSize = header.Length + payload.Length;
+        if (appendEof)
+        {
+            _logger.LogWarning("BLE: appendEof=true 已弃用！EOF 应单独通过 SendEofAsync() 发送");
+            totalSize += X4IMProtocol.EOF_MARKER.Length;
+        }
+
+        using var ms = new MemoryStream(totalSize);
         ms.Write(header, 0, header.Length);
         ms.Write(payload, 0, payload.Length);
 
         if (appendEof)
         {
-            _logger.LogWarning("BLE: appendEof=true 已弃用！EOF 应单独通过 SendEofAsync() 发送");
             ms.Write(X4IMProtocol.EOF_MARKER, 0, X4IMProtocol.EOF_MARKER.Length);
         }
 
         ms.Position = 0;
 
+        // 第一包：帧头 + 部分数据（最多 512 字节）
+        var firstPacketSize = Math.Min(MTU, (int)ms.Length);
+        var firstPacket = new byte[firstPacketSize];
+        await ms.ReadAsync(firstPacket, 0, firstPacketSize);
+
+        using var firstMs = new MemoryStream(firstPacket);
         await _connectedPeripheral
-            .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, ms)
+            .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, firstMs, MTU)
             .LastOrDefaultAsync();
+
+        _logger.LogDebug($"BLE: 已发送第一包 ({firstPacketSize} 字节)");
+
+        // 发送后续分片（每片 512 字节）
+        int chunkNum = 1;
+        while (ms.Position < ms.Length)
+        {
+            var remaining = (int)(ms.Length - ms.Position);
+            var chunkSize = Math.Min(MTU, remaining);
+            var chunk = new byte[chunkSize];
+            await ms.ReadAsync(chunk, 0, chunkSize);
+
+            using var chunkMs = new MemoryStream(chunk);
+            await _connectedPeripheral
+                .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, chunkMs, MTU)
+                .LastOrDefaultAsync();
+
+            chunkNum++;
+            if (chunkNum % 10 == 0 || ms.Position >= ms.Length)
+            {
+                var percent = (int)((ms.Position * 100) / ms.Length);
+                _logger.LogDebug($"BLE: 传输进度 {ms.Position}/{ms.Length} ({percent}%)");
+            }
+
+            await Task.Delay(10); // 节流
+        }
+
+        _logger.LogInformation($"BLE: 帧传输完成，共 {chunkNum} 个分片");
 
         return true;
     }

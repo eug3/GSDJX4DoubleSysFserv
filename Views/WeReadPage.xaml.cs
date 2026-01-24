@@ -265,89 +265,10 @@ public partial class WeReadPage : ContentPage
             const string script = "(function() {\n" +
                 "    function findSource(doc) {\n" +
                 "        try {\n" +
-                "            var img = doc.querySelector('img[alt=\"登录二维码\"]');\n" +
-                "            if (img && img.src) return { node: img, src: img.src, w: img.naturalWidth || img.width || 0, h: img.naturalHeight || img.height || 0 };\n" +
-                "            var canvas = doc.querySelector('canvas');\n" +
-                "            if (canvas && canvas.toDataURL) return { node: canvas, src: canvas.toDataURL('image/png'), w: canvas.width, h: canvas.height };\n" +
+                "            var img = doc.querySelector('.wr_login_modal_qr_img');\n" +
+                "            if (img && img.src) return img.src;\n" +
                 "        } catch (_) {}\n" +
                 "        return null;\n" +
-                "    }\n" +
-                "    function toBmp1bit(srcInfo) {\n" +
-                "        var dataUrl = srcInfo.src;\n" +
-                "        var w = srcInfo.w || 0;\n" +
-                "        var h = srcInfo.h || 0;\n" +
-                "        if (!dataUrl || !w || !h) return null;\n" +
-                "        var canvas = document.createElement('canvas');\n" +
-                "        canvas.width = w;\n" +
-                "        canvas.height = h;\n" +
-                "        var ctx = canvas.getContext('2d');\n" +
-                "        if (srcInfo.node && srcInfo.node.tagName === 'CANVAS') {\n" +
-                "            ctx.drawImage(srcInfo.node, 0, 0);\n" +
-                "        } else {\n" +
-                "            var img = document.createElement('img');\n" +
-                "            img.src = dataUrl;\n" +
-                "            ctx.drawImage(img, 0, 0, w, h);\n" +
-                "        }\n" +
-                "        var imgData = ctx.getImageData(0, 0, w, h).data;\n" +
-                "        var rowSize = Math.ceil(w / 32) * 4;\n" +
-                "        var sizeImage = rowSize * h;\n" +
-                "        var fileSize = 14 + 40 + 8 + sizeImage;\n" +
-                "        var buffer = new Uint8Array(fileSize);\n" +
-                "        var dv = new DataView(buffer.buffer);\n" +
-                "        buffer[0] = 0x42;\n" +
-                "        buffer[1] = 0x4D;\n" +
-                "        dv.setUint32(2, fileSize, true);\n" +
-                "        dv.setUint32(10, 14 + 40 + 8, true);\n" +
-                "        dv.setUint32(14, 40, true);\n" +
-                "        dv.setInt32(18, w, true);\n" +
-                "        dv.setInt32(22, -h, true);\n" +
-                "        dv.setUint16(26, 1, true);\n" +
-                "        dv.setUint16(28, 1, true);\n" +
-                "        dv.setUint32(30, 0, true);\n" +
-                "        dv.setUint32(34, sizeImage, true);\n" +
-                "        dv.setUint32(38, 2835, true);\n" +
-                "        dv.setUint32(42, 2835, true);\n" +
-                "        dv.setUint32(46, 2, true);\n" +
-                "        dv.setUint32(50, 2, true);\n" +
-                "        var paletteOffset = 14 + 40;\n" +
-                "        buffer[paletteOffset + 0] = 0x00;\n" +
-                "        buffer[paletteOffset + 1] = 0x00;\n" +
-                "        buffer[paletteOffset + 2] = 0x00;\n" +
-                "        buffer[paletteOffset + 3] = 0x00;\n" +
-                "        buffer[paletteOffset + 4] = 0xFF;\n" +
-                "        buffer[paletteOffset + 5] = 0xFF;\n" +
-                "        buffer[paletteOffset + 6] = 0xFF;\n" +
-                "        buffer[paletteOffset + 7] = 0x00;\n" +
-                "        var dataOffset = paletteOffset + 8;\n" +
-                "        var dst = buffer;\n" +
-                "        for (var y = 0; y < h; y++) {\n" +
-                "            var rowStart = dataOffset + y * rowSize;\n" +
-                "            var bitPos = 7;\n" +
-                "            var byteVal = 0;\n" +
-                "            for (var x = 0; x < w; x++) {\n" +
-                "                var idx = (y * w + x) * 4;\n" +
-                "                var r = imgData[idx];\n" +
-                "                var g = imgData[idx + 1];\n" +
-                "                var b = imgData[idx + 2];\n" +
-                "                var lum = (r + g + b) / 3;\n" +
-                "                var bit = lum < 128 ? 0 : 1;\n" +
-                "                byteVal |= (bit << bitPos);\n" +
-                "                bitPos--;\n" +
-                "                if (bitPos < 0) {\n" +
-                "                    dst[rowStart++] = byteVal;\n" +
-                "                    byteVal = 0;\n" +
-                "                    bitPos = 7;\n" +
-                "                }\n" +
-                "            }\n" +
-                "            if (bitPos !== 7) {\n" +
-                "                dst[rowStart] = byteVal;\n" +
-                "            }\n" +
-                "        }\n" +
-                "        var binary = '';\n" +
-                "        for (var i = 0; i < buffer.length; i++) {\n" +
-                "            binary += String.fromCharCode(buffer[i]);\n" +
-                "        }\n" +
-                "        return 'data:image/bmp;base64,' + btoa(binary);\n" +
                 "    }\n" +
                 "    var src = findSource(document);\n" +
                 "    if (!src) {\n" +
@@ -356,8 +277,7 @@ public partial class WeReadPage : ContentPage
                 "            src = findSource(frame.contentWindow.document);\n" +
                 "        }\n" +
                 "    }\n" +
-                "    if (!src) return null;\n" +
-                "    return toBmp1bit(src);\n" +
+                "    return src;\n" +
                 "})();";
 
             string? dataUrl = null;
@@ -379,26 +299,244 @@ public partial class WeReadPage : ContentPage
             var commaIndex = dataUrl.IndexOf(',');
             var base64 = commaIndex >= 0 ? dataUrl.Substring(commaIndex + 1) : dataUrl;
 
-            byte[] imageBytes;
+            byte[] bmpBytes;
             try
             {
-                imageBytes = Convert.FromBase64String(base64);
+                bmpBytes = Convert.FromBase64String(base64);
+                System.Diagnostics.Debug.WriteLine($"WeRead: BMP 大小 {bmpBytes.Length} 字节 ({bmpBytes.Length / 1024.0:F1} KB)");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"WeRead: 二维码 Base64 解析失败 - {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"WeRead: BMP Base64 解析失败 - {ex.Message}");
                 return;
             }
 
-            var sent = await _bleService.SendImageToDeviceAsync(imageBytes, "page_0.bmp", X4IMProtocol.FLAG_TYPE_BMP, true, 0);
+            var sent = await _bleService.SendImageToDeviceAsync(bmpBytes, "page_0.bmp", X4IMProtocol.FLAG_TYPE_BMP, true, 0);
             System.Diagnostics.Debug.WriteLine(sent
-                ? $"WeRead: 已发送登录二维码到设备 ({imageBytes.Length} 字节)"
+                ? $"WeRead: 已发送登录二维码到设备 ({bmpBytes.Length} 字节)"
                 : "WeRead: 发送登录二维码失败");
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"WeRead: 推送二维码失败 - {ex.Message}");
         }
+    }
+
+    private byte[]? PngTo1BitBmp(byte[] pngBytes)
+    {
+        try
+        {
+            // 检查 PNG 签名（89 50 4E 47 0D 0A 1A 0A）
+            ReadOnlySpan<byte> pngSignature = stackalloc byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+            if (pngBytes.Length < pngSignature.Length || !pngBytes.AsSpan(0, pngSignature.Length).SequenceEqual(pngSignature))
+            {
+                System.Diagnostics.Debug.WriteLine("WeRead: 无效的 PNG 签名");
+                return null;
+            }
+
+            // 读取 PNG 信息
+            int offset = 8;
+            int width = 0, height = 0;
+            int bitDepth = 0, colorType = 0;
+            List<byte> idatData = new List<byte>();
+
+            while (offset < pngBytes.Length - 8)
+            {
+                int length = ReadInt32BigEndian(pngBytes, offset);
+                string chunkType = System.Text.Encoding.ASCII.GetString(pngBytes, offset + 4, 4);
+
+                if (chunkType == "IHDR")
+                {
+                    width = ReadInt32BigEndian(pngBytes, offset + 8);
+                    height = ReadInt32BigEndian(pngBytes, offset + 12);
+                    bitDepth = pngBytes[offset + 16];
+                    colorType = pngBytes[offset + 17];
+                }
+                else if (chunkType == "IDAT")
+                {
+                    for (int i = 0; i < length; i++)
+                    {
+                        idatData.Add(pngBytes[offset + 8 + i]);
+                    }
+                }
+                else if (chunkType == "IEND")
+                {
+                    break;
+                }
+
+                offset += 12 + length; // 4(长度) + 4(类型) + 数据 + 4(CRC)
+            }
+
+            if (width == 0 || height == 0 || idatData.Count == 0)
+            {
+                System.Diagnostics.Debug.WriteLine("WeRead: PNG 信息不完整");
+                return null;
+            }
+
+            // 解压 zlib 数据
+            byte[] rawData;
+            try
+            {
+                rawData = Inflate(idatData.ToArray());
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"WeRead: zlib 解压失败 - {ex.Message}");
+                return null;
+            }
+
+            // 缩放到 240x240 以减小文件大小（目标 5-6KB）
+            const int targetSize = 240;
+            byte[] scaledData = ScaleImageData(rawData, width, height, targetSize, targetSize);
+            width = targetSize;
+            height = targetSize;
+
+            System.Diagnostics.Debug.WriteLine($"WeRead: 已缩放图片到 {width}x{height}");
+
+            // 计算 BMP 大小
+            int rowSize = ((width + 31) / 32) * 4;
+            int sizeImage = rowSize * height;
+            int fileSize = 14 + 40 + 8 + sizeImage;
+
+            System.Diagnostics.Debug.WriteLine($"WeRead: BMP 预估大小 {fileSize / 1024.0:F1} KB");
+
+            byte[] bmpBytes = new byte[fileSize];
+            using (var ms = new MemoryStream(bmpBytes))
+            using (var bw = new BinaryWriter(ms))
+            {
+                // BMP 文件头
+                bw.Write((byte)0x42); // 'B'
+                bw.Write((byte)0x4D); // 'M'
+                bw.Write(fileSize);
+                bw.Write(new byte[4]); // 保留
+                bw.Write(14 + 40 + 8); // 像素数据偏移
+
+                // DIB 信息头 (BITMAPINFOHEADER)
+                bw.Write(40); // 头大小
+                bw.Write(width);
+                bw.Write(-height); // 负数表示从上到下
+                bw.Write((short)1); // 颜色平面数
+                bw.Write((short)1); // 每像素位数
+                bw.Write(0); // 压缩
+                bw.Write(sizeImage);
+                bw.Write(2835); // X 分辨率
+                bw.Write(2835); // Y 分辨率
+                bw.Write(2); // 调色板颜色数
+                bw.Write(2); // 重要颜色数
+
+                // 调色板 (黑白)
+                bw.Write(new byte[] { 0x00, 0x00, 0x00, 0x00 }); // 黑色
+                bw.Write(new byte[] { 0xFF, 0xFF, 0xFF, 0x00 }); // 白色
+
+                // 像素数据
+                int rawIdx = 0;
+                for (int y = 0; y < height; y++)
+                {
+                    rawIdx++; // 跳过过滤字节
+                    int rowStart = (int)ms.Position;
+                    int bitPos = 7;
+                    byte byteVal = 0;
+
+                    for (int x = 0; x < width; x++)
+                    {
+                        byte r = scaledData[rawIdx++];
+                        byte g = scaledData[rawIdx++];
+                        byte b = scaledData[rawIdx++];
+                        byte lum = (byte)((r + g + b) / 3);
+                        byte bit = lum < 128 ? (byte)0 : (byte)1;
+
+                        if (bit == 1)
+                        {
+                            byteVal |= (byte)(1 << bitPos);
+                        }
+
+                        bitPos--;
+                        if (bitPos < 0)
+                        {
+                            bw.Write(byteVal);
+                            byteVal = 0;
+                            bitPos = 7;
+                        }
+                    }
+
+                    if (bitPos != 7)
+                    {
+                        bw.Write(byteVal);
+                    }
+
+                    // 填充到行大小
+                    while ((int)ms.Position < rowStart + rowSize)
+                    {
+                        bw.Write((byte)0);
+                    }
+                }
+            }
+
+            return bmpBytes;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"WeRead: PNG 转 BMP 异常 - {ex.Message}");
+            return null;
+        }
+    }
+
+    private int ReadInt32BigEndian(byte[] data, int offset)
+    {
+        return (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
+    }
+
+    /// <summary>
+    /// 缩放 PNG 原始数据（最近邻插值，适合二维码）
+    /// </summary>
+    private byte[] ScaleImageData(byte[] rawData, int srcWidth, int srcHeight, int dstWidth, int dstHeight)
+    {
+        // 目标数据：每行 1 字节过滤标记 + dstWidth * 3 字节 RGB
+        int dstRowSize = 1 + dstWidth * 3;
+        byte[] result = new byte[dstRowSize * dstHeight];
+
+        float xRatio = (float)srcWidth / dstWidth;
+        float yRatio = (float)srcHeight / dstHeight;
+
+        for (int dstY = 0; dstY < dstHeight; dstY++)
+        {
+            int dstRowOffset = dstY * dstRowSize;
+            result[dstRowOffset] = 0; // 过滤字节（无过滤）
+
+            int srcY = (int)(dstY * yRatio);
+            int srcRowOffset = srcY * (1 + srcWidth * 3); // 源行起始（包含过滤字节）
+
+            for (int dstX = 0; dstX < dstWidth; dstX++)
+            {
+                int srcX = (int)(dstX * xRatio);
+                int srcPixelOffset = srcRowOffset + 1 + srcX * 3; // 跳过过滤字节
+                int dstPixelOffset = dstRowOffset + 1 + dstX * 3;
+
+                // 复制 RGB
+                result[dstPixelOffset] = rawData[srcPixelOffset];     // R
+                result[dstPixelOffset + 1] = rawData[srcPixelOffset + 1]; // G
+                result[dstPixelOffset + 2] = rawData[srcPixelOffset + 2]; // B
+            }
+        }
+
+        return result;
+    }
+
+    private byte[] Inflate(byte[] compressed)
+    {
+        if (compressed.Length < 2)
+        {
+            throw new Exception("压缩数据太短");
+        }
+
+        byte[] data = new byte[compressed.Length - 2];
+        Array.Copy(compressed, 2, data, 0, data.Length);
+
+        using var compressedStream = new MemoryStream(data);
+        using var deflateStream = new System.IO.Compression.DeflateStream(compressedStream, System.IO.Compression.CompressionMode.Decompress);
+        using var resultStream = new MemoryStream();
+        deflateStream.CopyTo(resultStream);
+        return resultStream.ToArray();
     }
 }
 
