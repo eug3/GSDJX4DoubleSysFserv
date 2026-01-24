@@ -209,9 +209,16 @@ public class ShinyBleService : IBleService
                     {
                         var peripheral = scanResult.Peripheral;
                         var deviceId = peripheral.Uuid;
+
+                        // 过滤掉没有名字的设备
+                        if (string.IsNullOrWhiteSpace(peripheral.Name))
+                        {
+                            return;
+                        }
+
                         deviceCount++;
 
-                        _logger.LogDebug($"BLE: 发现设备 - {peripheral.Name ?? "未知"} (UUID: {deviceId})");
+                        _logger.LogDebug($"BLE: 发现设备 - {peripheral.Name} (UUID: {deviceId})");
 
                         if (deviceId == savedDeviceId)
                         {
@@ -221,7 +228,7 @@ public class ShinyBleService : IBleService
 
                             _discoveredPeripherals[deviceId] = peripheral;
 
-                            _logger.LogInformation($"BLE: 找到已保存的设备 {peripheral.Name ?? "未知"}");
+                            _logger.LogInformation($"BLE: 找到已保存的设备 {peripheral.Name}");
                             MainThread.BeginInvokeOnMainThread(async () =>
                             {
                                 await ConnectAsync(deviceId, savedDeviceId);
@@ -344,12 +351,19 @@ public class ShinyBleService : IBleService
                     scanResult =>
                     {
                         var peripheral = scanResult.Peripheral;
+
+                        // 过滤掉没有名字的设备
+                        if (string.IsNullOrWhiteSpace(peripheral.Name))
+                        {
+                            return;
+                        }
+
                         deviceCount++;
-                        
+
                         var peripheralUuid = peripheral.Uuid;
                         _discoveredPeripherals[peripheralUuid] = peripheral;
-                        
-                        _logger.LogDebug($"BLE: 发现设备 - {peripheral.Name ?? "未知"} (UUID: {peripheralUuid})");
+
+                        _logger.LogDebug($"BLE: 发现设备 - {peripheral.Name} (UUID: {peripheralUuid})");
 
                         if (peripheralUuid == targetDeviceId)
                         {
@@ -955,7 +969,12 @@ public class ShinyBleService : IBleService
                 {
                     var peripheral = scanResult.Peripheral;
                     var deviceId = peripheral.Uuid;
-                    var deviceName = peripheral.Name ?? "未知设备";
+
+                    // 过滤掉没有名字的设备
+                    if (string.IsNullOrWhiteSpace(peripheral.Name))
+                    {
+                        return;
+                    }
 
                     if (!_discoveredPeripherals.ContainsKey(deviceId))
                     {
@@ -964,14 +983,14 @@ public class ShinyBleService : IBleService
                         var deviceInfo = new BleDeviceInfo
                         {
                             Id = deviceId,
-                            Name = $"{deviceName} ({deviceId.Substring(0, Math.Min(8, deviceId.Length))}...)",
+                            Name = $"{peripheral.Name} ({deviceId.Substring(0, Math.Min(8, deviceId.Length))}...)",
                             MacAddress = deviceId
                         };
 
                         MainThread.BeginInvokeOnMainThread(() =>
                         {
                             _scannedDevices?.Add(deviceInfo);
-                            _logger.LogDebug($"BLE: 发现设备 - {deviceName}");
+                            _logger.LogDebug($"BLE: 发现设备 - {peripheral.Name}");
                         });
                     }
                 },

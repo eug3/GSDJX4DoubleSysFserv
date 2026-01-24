@@ -122,21 +122,36 @@ public partial class WeReadPage : ContentPage
         {
             var result = await WebView.EvaluateJavaScriptAsync("""
                 (function() {
-                    var candidates = document.querySelectorAll('a.wr_index_page_top_section_header_action_link');
+                    function hasText(node, text) { return node && node.innerText && node.innerText.replace(/\s+/g, '').indexOf(text) !== -1; }
+
+                    // 先检查是否有 "退出登录"（代表已登录）
+                    var candidates = document.querySelectorAll('.wr_index_page_top_section_header_action_link');
                     for (var i = 0; i < candidates.length; i++) {
-                        if (candidates[i].innerText.indexOf('登录') !== -1) {
-                            return 'has_login';
+                        if (hasText(candidates[i], '退出登录')) {
+                            return 'logged_in';
                         }
                     }
-
                     var anchors = document.getElementsByTagName('a');
                     for (var j = 0; j < anchors.length; j++) {
-                        if (anchors[j].innerText.indexOf('登录') !== -1) {
+                        if (hasText(anchors[j], '退出登录')) {
+                            return 'logged_in';
+                        }
+                    }
+
+                    // 如果存在单独的 "登录" 文本（且不包含 "退出登录"），说明未登录
+                    for (var i = 0; i < candidates.length; i++) {
+                        if (hasText(candidates[i], '登录') && !hasText(candidates[i], '退出登录')) {
+                            return 'has_login';
+                        }
+                    }
+                    for (var j = 0; j < anchors.length; j++) {
+                        if (hasText(anchors[j], '登录') && !hasText(anchors[j], '退出登录')) {
                             return 'has_login';
                         }
                     }
 
-                    return 'no_login';
+                    // 未发现 "登录"（且未发现 "退出登录"），默认认为已登录
+                    return 'logged_in';
                 })();
             """);
 
@@ -146,7 +161,7 @@ public partial class WeReadPage : ContentPage
         catch
         {
             // 出错时默认不显示登录按钮
-            LoginButton.IsVisible = false;
+            LoginButton.IsVisible =  false;
         }
     }
 
@@ -175,7 +190,7 @@ public partial class WeReadPage : ContentPage
 
                         // 先检查是否已经登录（检测退出登录按钮）
                         var logoutLink = document.querySelector('.wr_index_page_top_section_header_action_avatar_dropdown_item_lang');
-                        if (logoutLink && logoutLink.innerText.indexOf('退出登录') !== -1) {
+                        if (logoutLink && logoutLink.innerText.replace(/\s+/g, '').indexOf('退出登录') !== -1) {
                             console.log('已检测到退出登录，用户已登录');
                             clearInterval(timer);
                             return;
@@ -189,7 +204,7 @@ public partial class WeReadPage : ContentPage
                         var loginLink = null;
                         var candidates = document.querySelectorAll('a.wr_index_page_top_section_header_action_link');
                         for (var i = 0; i < candidates.length; i++) {
-                            if (candidates[i].innerText.indexOf('登录') !== -1) {
+                            if (candidates[i].innerText.replace(/\s+/g, '').indexOf('登录') !== -1) {
                                 loginLink = candidates[i];
                                 break;
                             }
@@ -198,7 +213,7 @@ public partial class WeReadPage : ContentPage
                         if (!loginLink) {
                             var anchors = document.getElementsByTagName('a');
                             for (var j = 0; j < anchors.length; j++) {
-                                if (anchors[j].innerText.indexOf('登录') !== -1) {
+                                if (anchors[j].innerText.replace(/\s+/g, '').indexOf('登录') !== -1) {
                                     loginLink = anchors[j];
                                     break;
                                 }
