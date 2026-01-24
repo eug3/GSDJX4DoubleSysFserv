@@ -268,8 +268,9 @@ public class ShinyBleDelegate : BleDelegate
     {
         try
         {
-            var message = Encoding.UTF8.GetString(data).Trim();
-            _logger.LogInformation($"BLE Delegate: 后台收到通知 - {message}");
+            var hex = BitConverter.ToString(data);
+            var message = NormalizeNotificationText(data);
+            _logger.LogInformation($"BLE Delegate: 后台收到通知 - {message} (hex={hex})");
 
             // 触发通知事件，让 ShinyBleService 处理
             NotificationReceivedInBackground?.Invoke(this, new BleNotificationEventArgs(peripheral, data, message));
@@ -278,6 +279,17 @@ public class ShinyBleDelegate : BleDelegate
         {
             _logger.LogError($"BLE Delegate: 处理通知失败 - {ex.Message}");
         }
+    }
+
+    private static string NormalizeNotificationText(byte[] data)
+    {
+        var printable = data.Where(b => b >= 0x20 && b <= 0x7E).ToArray();
+        if (printable.Length > 0)
+        {
+            return Encoding.ASCII.GetString(printable);
+        }
+
+        return data.Length > 0 ? $"0x{data[0]:X2}" : string.Empty;
     }
 }
 

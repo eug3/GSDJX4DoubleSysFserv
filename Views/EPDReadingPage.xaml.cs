@@ -43,20 +43,80 @@ public partial class EPDReadingPage : ContentPage
 
         // 页面加载时更新状态
         Loaded += OnPageLoaded;
-        
+
         // 订阅按键事件
         _bleService.ButtonPressed += OnButtonPressed;
+
+        // 订阅连接状态变化事件（用于连接时自动发送）
+        _bleService.ConnectionStateChanged += OnConnectionStateChanged;
     }
 
-    private void OnPageLoaded(object? sender, EventArgs e)
+    private async void OnPageLoaded(object? sender, EventArgs e)
     {
         UpdateConnectionStatus();
         UpdatePageInfo();
+
+        // 优先检查 URL 缓存
+        if (!string.IsNullOrEmpty(_bookUrl))
+        {
+            var cachedContent = await _weReadService.GetCachedContentAsync(_bookUrl);
+            if (!string.IsNullOrEmpty(cachedContent))
+            {
+                // 使用缓存内容
+                ContentEditor.Text = cachedContent;
+                SetStatus($"✅ 已加载缓存内容 ({cachedContent.Length} 字符)");
+                UpdatePageInfo();
+
+                // 自动发送到设备
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(500);
+                    await AutoSendCurrentContentAsync();
+                });
+                return;
+            }
+        }
 
         // 如果有已保存的内容，显示它
         if (!string.IsNullOrEmpty(_weReadService.State.LastText))
         {
             ContentEditor.Text = _weReadService.State.LastText;
+
+            // 页面启动时自动发送到设备
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(500); // 延迟以确保连接状态稳定
+                await AutoSendCurrentContentAsync();
+            });
+        }
+        // 如果没有已保存的内容，但提供了 URL，自动获取当前页
+        else if (!string.IsNullOrEmpty(_bookUrl))
+        {
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(300); // 短暂延迟确保 UI 准备好
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    OnGetCurrentPage(this, EventArgs.Empty);
+                });
+            });
+        }
+    }
+
+    /// <summary>
+    /// 处理连接状态变化事件 - 当设备连接时自动发送当前内容
+    /// </summary>
+    private async void OnConnectionStateChanged(object? sender, ConnectionStateChangedEventArgs e)
+    {
+        if (e.IsConnected)
+        {
+            System.Diagnostics.Debug.WriteLine($"EPDReading: 设备已连接 - {e.DeviceName}，尝试自动发送当前内容");
+            UpdateConnectionStatus();
+            await AutoSendCurrentContentAsync();
+        }
+        else
+        {
+            UpdateConnectionStatus();
         }
     }
 
@@ -275,42 +335,134 @@ public partial class EPDReadingPage : ContentPage
     }
 
     /// <summary>
-    /// 处理ESP32设备发送的按键事件（左、右、上、下）
+    /// 自动发送当前编辑器内容到 EPD 设备
+    /// 用于页面启动时和设备连接时自动发送
+    /// </summary>
+    private async Task AutoSendCurrentContentAsync()
+    {
+        var content = ContentEditor.Text;
+        if (string.IsNullOrEmpty(content))
+        {
+            System.Diagnostics.Debug.WriteLine("自动发送当前内容: 编辑器内容为空，跳过");
+            return;
+        }
+
+        if (!_bleService.IsConnected)
+        {
+            System.Diagnostics.Debug.WriteLine("自动发送当前内容: 蓝牙未连接，跳过");
+            return;
+        }
+
+        MainThread.BeginInvokeOnMainThread(() =>
+        {
+            SetStatus("📤 正在自动发送当前页到 EPD 设备...");
+        });
+
+        try
+        {
+            var success = await _bleService.SendTextToDeviceAsync(content, _weReadService.State.Page);
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                if (success)
+                {
+                    SetStatus($"✅ 已自动发送当前页到设备 ({content.Length} 字符)");
+                }
+                else
+                {
+                    SetStatus("自动发送当前页失败", true);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                SetStatus($"自动发送当前页失败: {ex.Message}", true);
+            });
+            System.Diagnostics.Debug.WriteLine($"自动发送当前页异常: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// 处理ESP32设备发送的按键事件
+    /// 
+    /// 关键逻辑（参考 BleReadBook/main.js）：
+    /// - ESP32 只在 文本末尾 时发送 0x81 (NEXT_PAGE) / 0x82 (PREV_PAGE)
+    /// - 其他时候是本地翻页，**不应该发送网络请求**
+    /// 
+    /// RIGHT/LEFT 的含义：
+    ///   • 0x81 (RIGHT): 当前页是最后一页 → 请求下一章
+    ///   • 0x82 (LEFT):  当前页是第一页 → 请求上一章
+    ///   • UP/DOWN:      中间页的本地翻页 → 不发送网络请求
     /// </summary>
     private async void OnButtonPressed(object? sender, ButtonEventArgs e)
     {
-        System.Diagnostics.Debug.WriteLine($"📱 检测到设备按键: {e.Key}");
+        System.Diagnostics.Debug.WriteLine($"🎯 ESP32 按键: {e.Key}");
 
         switch (e.Key.ToUpper())
         {
-            case "LEFT":
-                System.Diagnostics.Debug.WriteLine("设备按键: LEFT - 执行上一章");
-                MainThread.BeginInvokeOnMainThread(() => OnPrevChapter(this, EventArgs.Empty));
+            case "RIGHT":
+                // ✅ RIGHT = 0x81 = 页面已到末尾，请求下一章
+                System.Diagnostics.Debug.WriteLine("✅ RIGHT (0x81): 当前页是末尾，请求下一章");
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    if (!string.IsNullOrEmpty(_weReadService.State.CurrentUrl))
+                    {
+                        OnNextChapter(this, EventArgs.Empty);
+                    }
+                    else
+                    {
+                        SetStatus("未设置阅读 URL，无法获取下一章", true);
+                    }
+                });
                 break;
 
-            case "RIGHT":
-                System.Diagnostics.Debug.WriteLine("设备按键: RIGHT - 执行下一章");
-                MainThread.BeginInvokeOnMainThread(() => OnNextChapter(this, EventArgs.Empty));
+            case "LEFT":
+                // ✅ LEFT = 0x82 = 页面已到开头，请求上一章
+                System.Diagnostics.Debug.WriteLine("✅ LEFT (0x82): 当前页是开头，请求上一章");
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    if (!string.IsNullOrEmpty(_weReadService.State.CurrentUrl))
+                    {
+                        OnPrevChapter(this, EventArgs.Empty);
+                    }
+                    else
+                    {
+                        SetStatus("未设置阅读 URL，无法获取上一章", true);
+                    }
+                });
                 break;
 
             case "UP":
-                System.Diagnostics.Debug.WriteLine("设备按键: UP - 本地翻页");
-                SetStatus("设备按键: 向上翻页");
+                // ⚠️ UP = 本地滚动页面向上（不发送网络请求）
+                System.Diagnostics.Debug.WriteLine("⚠️  UP: 本地页面向上滚动");
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    SetStatus("设备本地翻页: 向上", false);
+                });
                 break;
 
             case "DOWN":
-                System.Diagnostics.Debug.WriteLine("设备按键: DOWN - 本地翻页");
-                SetStatus("设备按键: 向下翻页");
+                // ⚠️ DOWN = 本地滚动页面向下（不发送网络请求）
+                System.Diagnostics.Debug.WriteLine("⚠️  DOWN: 本地页面向下滚动");
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    SetStatus("设备本地翻页: 向下", false);
+                });
                 break;
 
             case "OK":
             case "ENTER":
-                System.Diagnostics.Debug.WriteLine("设备按键: OK/ENTER - 刷新屏幕");
-                SetStatus("设备按键: 确认/刷新");
+                // ℹ️ OK = 确认/刷新
+                System.Diagnostics.Debug.WriteLine("ℹ️  OK: 刷新屏幕");
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    SetStatus("设备请求刷新屏幕", false);
+                });
                 break;
 
             default:
-                System.Diagnostics.Debug.WriteLine($"未知的设备按键: {e.Key}");
+                System.Diagnostics.Debug.WriteLine($"❓ 未知按键: {e.Key}");
                 break;
         }
     }

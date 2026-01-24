@@ -95,6 +95,16 @@ public interface IWeReadService
     /// 发送当前文本内容到 BLE 设备
     /// </summary>
     Task<bool> SendToDeviceAsync(IBleService bleService);
+
+    /// <summary>
+    /// 根据 URL 获取缓存的文本内容
+    /// </summary>
+    Task<string?> GetCachedContentAsync(string url);
+
+    /// <summary>
+    /// 缓存文本内容，使用 URL 作为 key
+    /// </summary>
+    Task CacheContentAsync(string url, string content);
 }
 
 /// <summary>
@@ -107,6 +117,7 @@ public class WeReadService : IWeReadService
     private readonly JsonSerializerOptions _jsonOptions;
 
     private const string StateKey = "WeRead_State";
+    private const string CacheKeyPrefix = "WeReadCache_";
 
     public string ServerUrl { get; set; } = "https://3gx043ki8112.vicp.fun";
     public WeReadState State { get; private set; } = new();
@@ -172,6 +183,8 @@ public class WeReadService : IWeReadService
         State.LastText = content;
 
         await SaveStateAsync();
+        // 缓存内容
+        await CacheContentAsync(url, content);
         return content;
     }
 
@@ -182,6 +195,8 @@ public class WeReadService : IWeReadService
         State.LastText = content;
 
         await SaveStateAsync();
+        // 缓存内容
+        await CacheContentAsync(State.CurrentUrl, content);
         return content;
     }
 
@@ -192,6 +207,8 @@ public class WeReadService : IWeReadService
         State.LastText = content;
 
         await SaveStateAsync();
+        // 缓存内容
+        await CacheContentAsync(State.CurrentUrl, content);
         return content;
     }
 
@@ -221,7 +238,7 @@ public class WeReadService : IWeReadService
             try
             {
                 var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
-                
+
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 var response = await _httpClient.PostAsync(apiUrl, httpContent, cts.Token);
                 var responseContent = await response.Content.ReadAsStringAsync(cts.Token);
@@ -233,7 +250,29 @@ public class WeReadService : IWeReadService
                     throw new Exception($"API 请求失败: {response.StatusCode} - {responseContent}");
                 }
 
-                var result = JsonSerializer.Deserialize<WeReadResponse>(responseContent, _jsonOptions);
+                // 检查响应是否是 JSON 格式
+                if (string.IsNullOrWhiteSpace(responseContent))
+                {
+                    throw new Exception("服务器返回空响应");
+                }
+
+                // 如果响应以 '<' 开头，说明是 HTML 而不是 JSON
+                if (responseContent.TrimStart().StartsWith('<'))
+                {
+                    var preview = responseContent.Length > 500 ? responseContent.Substring(0, 500) + "..." : responseContent;
+                    throw new Exception($"服务器返回了 HTML 页面而不是 JSON（可能是错误页面）。响应内容: {preview}");
+                }
+
+                WeReadResponse? result = null;
+                try
+                {
+                    result = JsonSerializer.Deserialize<WeReadResponse>(responseContent, _jsonOptions);
+                }
+                catch (JsonException ex)
+                {
+                    var preview = responseContent.Length > 300 ? responseContent.Substring(0, 300) + "..." : responseContent;
+                    throw new Exception($"JSON 解析失败: {ex.Message}。服务器响应: {preview}");
+                }
 
                 if (result == null)
                 {
@@ -270,6 +309,13 @@ public class WeReadService : IWeReadService
                 // 超时，等待后重试
                 lastException = ex;
                 System.Diagnostics.Debug.WriteLine($"WeRead: 请求超时 (尝试 {attempt}/{maxRetries})");
+                await Task.Delay(1000 * attempt);
+            }
+            catch (Exception ex) when ((ex.Message.Contains("'<'") || ex.Message.Contains("JSON") || ex.Message.Contains("HTML")) && attempt < maxRetries)
+            {
+                // JSON/HTML 解析错误，等待后重试（第一次请求可能返回 HTML 用于会话初始化）
+                lastException = ex;
+                System.Diagnostics.Debug.WriteLine($"WeRead: 响应格式错误，重试中 (尝试 {attempt}/{maxRetries}): {ex.Message}");
                 await Task.Delay(1000 * attempt);
             }
             catch (Exception ex) when (ex.Message.Contains("network connection was lost") && attempt < maxRetries)
@@ -337,9 +383,9 @@ public class WeReadService : IWeReadService
             }
 
             System.Diagnostics.Debug.WriteLine($"WeRead: 开始发送文本到设备 (页数: {State.Page}, 字符数: {State.LastText.Length})");
-            
+
             var result = await bleService.SendTextToDeviceAsync(State.LastText, State.Page);
-            
+
             if (result)
             {
                 System.Diagnostics.Debug.WriteLine($"WeRead: 文本发送成功");
@@ -355,6 +401,49 @@ public class WeReadService : IWeReadService
         {
             System.Diagnostics.Debug.WriteLine($"WeRead: 发送文本异常 - {ex.Message}");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// 根据 URL 获取缓存的文本内容
+    /// </summary>
+    public async Task<string?> GetCachedContentAsync(string url)
+    {
+        try
+        {
+            var cacheKey = CacheKeyPrefix + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(url)).ToLowerInvariant();
+            var content = await _storageService.GetAsync<string>(cacheKey);
+
+            if (!string.IsNullOrEmpty(content))
+            {
+                System.Diagnostics.Debug.WriteLine($"WeRead: 从缓存加载内容 - URL={url}");
+                return content;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"WeRead: 缓存未命中 - URL={url}");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"WeRead: 读取缓存失败 - {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 缓存文本内容，使用 URL 作为 key
+    /// </summary>
+    public async Task CacheContentAsync(string url, string content)
+    {
+        try
+        {
+            var cacheKey = CacheKeyPrefix + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(url)).ToLowerInvariant();
+            await _storageService.SetAsync(cacheKey, content);
+            System.Diagnostics.Debug.WriteLine($"WeRead: 内容已缓存 - URL={url}, 长度={content.Length}");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"WeRead: 缓存内容失败 - {ex.Message}");
         }
     }
 }

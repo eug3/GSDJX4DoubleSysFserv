@@ -32,6 +32,13 @@ public class ShinyBleService : IBleService
     private TaskCompletionSource<ObservableCollection<BleDeviceInfo>>? _scanTcs;
     private IDisposable? _scanSubscription;
     private IDisposable? _notifySubscription;
+    private static readonly Dictionary<byte, string> CommandButtonMap = new()
+    {
+        { X4IMProtocol.CMD_NEXT_PAGE, "RIGHT" },
+        { X4IMProtocol.CMD_PREV_PAGE, "LEFT" },
+        { X4IMProtocol.CMD_REFRESH, "OK" },
+        { X4IMProtocol.CMD_SHOW_PAGE, "OK" }
+    };
     
     // 按键事件
     public event EventHandler<ButtonEventArgs>? ButtonPressed;
@@ -122,14 +129,7 @@ public class ShinyBleService : IBleService
     /// </summary>
     private void OnNotificationReceivedInBackground(object? sender, BleNotificationEventArgs e)
     {
-        _logger.LogInformation($"BLE Service: 收到后台通知 - {e.Message}");
-        
-        // 解析按键事件 (格式: "BTN:LEFT", "BTN:RIGHT", etc.)
-        if (e.Message.StartsWith("BTN:"))
-        {
-            var key = e.Message.Substring(4);
-            ButtonPressed?.Invoke(this, new ButtonEventArgs(key));
-        }
+        HandleNotification(e.Data, e.Message, "后台");
     }
 
     /// <summary>
@@ -553,22 +553,110 @@ public class ShinyBleService : IBleService
     /// </summary>
     private void ProcessNotification(byte[] data)
     {
+        HandleNotification(data, null, "前台");
+    }
+
+    private void HandleNotification(byte[] data, string? messageFromDelegate, string sourceLabel)
+    {
         try
         {
-            var message = Encoding.UTF8.GetString(data).Trim();
-            _logger.LogInformation($"BLE: 收到通知 - {message}");
+            var hex = BitConverter.ToString(data);
+            var message = NormalizeNotificationText(data, messageFromDelegate);
+            _logger.LogInformation($"🔔 BLE 收到{sourceLabel}通知 (长度: {data.Length}B)");
+            _logger.LogInformation($"   文本: \"{message}\"");
+            _logger.LogInformation($"   Hex:  {hex}");
 
-            // 解析按键事件 (格式: "BTN:LEFT", "BTN:RIGHT", etc.)
-            if (message.StartsWith("BTN:"))
+            if (TryMapButtonKey(message, data, out var key))
             {
-                var key = message.Substring(4);
+                _logger.LogInformation($"✅ 映射到按键事件: {key}");
                 ButtonPressed?.Invoke(this, new ButtonEventArgs(key));
+                return;
             }
+
+            _logger.LogWarning($"⚠️  未识别的通知格式，忽略");
         }
         catch (Exception ex)
         {
-            _logger.LogError($"BLE: 处理通知失败 - {ex.Message}");
+            _logger.LogError($"❌ 处理通知失败: {ex.Message}");
         }
+    }
+
+    private static string NormalizeNotificationText(byte[] data, string? original)
+    {
+        if (!string.IsNullOrWhiteSpace(original))
+        {
+            var trimmed = original.Trim('\0', '\r', '\n', ' ');
+            if (!string.IsNullOrEmpty(trimmed))
+            {
+                return trimmed;
+            }
+        }
+
+        var printable = data.Where(b => b >= 0x20 && b <= 0x7E).ToArray();
+        if (printable.Length > 0)
+        {
+            return Encoding.ASCII.GetString(printable);
+        }
+
+        return data.Length > 0 ? $"0x{data[0]:X2}" : string.Empty;
+    }
+
+    private bool TryMapButtonKey(string message, byte[] data, out string key)
+    {
+        key = string.Empty;
+
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            var normalized = message.Trim().ToUpperInvariant();
+
+            // 文本协议：BTN:LEFT, BTN:RIGHT 等
+            if (normalized.StartsWith("BTN:"))
+            {
+                key = normalized.Substring(4);
+                return true;
+            }
+
+            // 别名映射：NEXT_PAGE → RIGHT, PREV_PAGE → LEFT
+            if (normalized is "NEXT_PAGE" or "NEXT" or "PAGE_NEXT" or "RIGHT")
+            {
+                key = "RIGHT";
+                return true;
+            }
+
+            if (normalized is "PREV_PAGE" or "PREVIOUS" or "PAGE_PREV" or "LEFT")
+            {
+                key = "LEFT";
+                return true;
+            }
+
+            if (normalized is "UP")
+            {
+                key = "UP";
+                return true;
+            }
+
+            if (normalized is "DOWN")
+            {
+                key = "DOWN";
+                return true;
+            }
+
+            if (normalized is "OK" or "ENTER")
+            {
+                key = "OK";
+                return true;
+            }
+        }
+
+        // 二进制协议：直接映射命令字节（如 0x81=NEXT_PAGE → RIGHT）
+        if (data.Length > 0 && CommandButtonMap.TryGetValue(data[0], out var mapped))
+        {
+            _logger.LogInformation($"   命令字节映射: 0x{data[0]:X2} → {mapped}");
+            key = mapped;
+            return true;
+        }
+
+        return false;
     }
 
     public void Disconnect()

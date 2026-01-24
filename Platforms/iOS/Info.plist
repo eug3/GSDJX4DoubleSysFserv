@@ -41,7 +41,7 @@
 	<!-- 后台模式 -->
 	<key>UIBackgroundModes</key>
 	<array>
-		<string>bluetooth-central</string>
+		<string>bluetooth-central</string>		
 		<string>fetch</string>
 		<string>processing</string>
 	</array>
