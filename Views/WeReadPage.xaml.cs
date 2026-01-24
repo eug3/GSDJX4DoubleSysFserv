@@ -93,6 +93,12 @@ public partial class WeReadPage : ContentPage
         // 确保有最新的 Cookie
         await GetCookieAsync();
 
+        // 在 UI 跳转前同步更新后台阅读上下文（URL & Cookie）
+        if (!string.IsNullOrEmpty(_currentUrl))
+        {
+            await _bleService.UpdateReadingContextAsync(_currentUrl, _currentCookie);
+        }
+
         // 跳转到 EPD 阅读页面，传递 URL 和 Cookie
         var encodedUrl = Uri.EscapeDataString(_currentUrl);
         var encodedCookie = Uri.EscapeDataString(_currentCookie);

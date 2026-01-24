@@ -48,6 +48,21 @@ public interface IBleService
     /// 连接状态变化事件
     /// </summary>
     event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
+
+    /// <summary>
+    /// 处理来自设备的按键事件（自动翻页并获取内容发送到设备）
+    /// 此方法由 UI 或后台调用，统一在 Service 层处理
+    /// </summary>
+    /// <param name="key">按键类型: LEFT, RIGHT, UP, DOWN, OK</param>
+    Task ProcessButtonAsync(string key);
+
+    /// <summary>
+    /// 更新阅读上下文（URL 与 Cookie），并持久化到本地存储
+    /// UI 可调用此方法进行参数同步，后台无需依赖 UI 也能工作
+    /// </summary>
+    /// <param name="url">当前阅读器页面 URL</param>
+    /// <param name="cookie">当前页面 Cookie</param>
+    Task UpdateReadingContextAsync(string url, string cookie);
 }
 
 /// <summary>

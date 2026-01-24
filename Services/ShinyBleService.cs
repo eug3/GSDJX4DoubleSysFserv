@@ -5,6 +5,9 @@ using System.Reactive.Linq;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using System.IO;
+#if IOS
+using UIKit;
+#endif
 
 namespace GSDJX4DoubleSysFserv.Services;
 
@@ -22,6 +25,7 @@ public class ShinyBleService : IBleService
     private readonly IBleManager _bleManager;
     private readonly IStorageService _storageService;
     private readonly ILogger<ShinyBleService> _logger;
+    private readonly IWeReadService _weReadService;
     private const string SavedMacKey = "Ble_SavedMacAddress";
 
     private IPeripheral? _connectedPeripheral;
@@ -40,6 +44,11 @@ public class ShinyBleService : IBleService
         { X4IMProtocol.CMD_SHOW_PAGE, "OK" }
     };
     
+    // 防重复处理：记录最后处理的按键和时间戳
+    private string? _lastProcessedKey;
+    private DateTime _lastProcessedTime = DateTime.MinValue;
+    private readonly TimeSpan _debounceInterval = TimeSpan.FromMilliseconds(500); // 500ms 防抖
+    
     // 按键事件
     public event EventHandler<ButtonEventArgs>? ButtonPressed;
     
@@ -49,14 +58,18 @@ public class ShinyBleService : IBleService
     public bool IsConnected { get; private set; }
     public string? ConnectedDeviceName { get; private set; }
 
-    public ShinyBleService(IBleManager bleManager, IStorageService storageService, ILogger<ShinyBleService> logger)
+    public ShinyBleService(IBleManager bleManager, IStorageService storageService, ILogger<ShinyBleService> logger, IWeReadService weReadService)
     {
         _bleManager = bleManager;
         _storageService = storageService;
         _logger = logger;
+        _weReadService = weReadService;
         
         // 订阅后台委托的事件
         SubscribeToBackgroundDelegateEvents();
+
+        // 后台初始化阅读状态（无需 UI 即可工作）
+        _ = _weReadService.LoadStateAsync();
     }
 
     /// <summary>
@@ -570,6 +583,131 @@ public class ShinyBleService : IBleService
         HandleNotification(data, null, "前台");
     }
 
+    /// <summary>
+    /// 统一处理按键事件（自动翻页并获取内容发送到设备）
+    /// 此方法由 UI 或后台调用，确保不会重复执行
+    /// </summary>
+    public async Task ProcessButtonAsync(string key)
+    {
+        // 防重复检查：如果在防抖时间窗口内收到相同按键，直接忽略
+        lock (this)
+        {
+            var now = DateTime.UtcNow;
+            if (key == _lastProcessedKey && (now - _lastProcessedTime) < _debounceInterval)
+            {
+                _logger.LogDebug($"⚠️ 忽略重复按键事件: {key} (距上次 {(now - _lastProcessedTime).TotalMilliseconds:F0}ms)");
+                return;
+            }
+
+            _lastProcessedKey = key;
+            _lastProcessedTime = now;
+            _logger.LogInformation($"✅ 处理按键事件: {key}");
+        }
+
+        try
+        {
+#if IOS
+            // 在 iOS 上开启后台任务，确保网络请求与 BLE 写入可在后台完成
+            nint bgTaskId = 0;
+            try
+            {
+                bgTaskId = UIApplication.SharedApplication.BeginBackgroundTask("BLEPageTurn", () => { });
+#endif
+            // 处理 RIGHT/LEFT 翻页；OK/ENTER 刷新当前内容
+            if ((key != "RIGHT" && key != "LEFT" && key != "OK" && key != "ENTER") ||
+                !IsConnected ||
+                string.IsNullOrEmpty(_weReadService.State.CurrentUrl))
+            {
+                return;
+            }
+
+            string content = string.Empty;
+            if (key == "OK" || key == "ENTER")
+            {
+                // 设备请求刷新：直接发送最后一次成功内容（走缓存）
+                content = _weReadService.State.LastText;
+                if (string.IsNullOrEmpty(content))
+                {
+                    var cached = await _weReadService.GetCachedContentAsync(_weReadService.State.CurrentUrl);
+                    content = cached ?? string.Empty;
+                }
+                _logger.LogInformation($"🔁 刷新当前页，使用已保存/缓存内容: {(string.IsNullOrEmpty(content) ? 0 : content.Length)} 字符");
+            }
+            else if (key == "RIGHT")
+            {
+                _logger.LogInformation($"🔄 处理按键：获取下一章");
+                try
+                {
+                    content = await _weReadService.GetNextPageAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"获取下一章失败，尝试使用缓存: {ex.Message}");
+                    var cached = await _weReadService.GetCachedContentAsync(_weReadService.State.CurrentUrl);
+                    content = cached ?? string.Empty;
+                }
+            }
+            else // LEFT
+            {
+                _logger.LogInformation($"🔄 处理按键：获取上一章");
+                try
+                {
+                    content = await _weReadService.GetPrevPageAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"获取上一章失败，尝试使用缓存: {ex.Message}");
+                    var cached = await _weReadService.GetCachedContentAsync(_weReadService.State.CurrentUrl);
+                    content = cached ?? string.Empty;
+                }
+            }
+
+            // 自动发送到设备
+            if (!string.IsNullOrEmpty(content))
+            {
+                _logger.LogInformation($"📤 发送内容到 EPD ({content.Length} 字符)");
+                var success = await SendTextToDeviceAsync(content, _weReadService.State.Page);
+                if (success)
+                {
+                    _logger.LogInformation($"✅ 发送成功");
+                }
+                else
+                {
+                    _logger.LogWarning($"⚠️ 发送失败");
+                }
+            }
+#if IOS
+            }
+            finally
+            {
+                if (bgTaskId != 0)
+                    UIApplication.SharedApplication.EndBackgroundTask(bgTaskId);
+            }
+#endif
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"❌ 处理按键失败: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 更新阅读上下文（URL 与 Cookie），并持久化
+    /// </summary>
+    public async Task UpdateReadingContextAsync(string url, string cookie)
+    {
+        try
+        {
+            _weReadService.SetReadingContext(url, cookie);
+            await _weReadService.SaveStateAsync();
+            _logger.LogInformation($"WeRead: 阅读上下文已更新 URL={url} CookieLen={cookie?.Length ?? 0}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"WeRead: 更新阅读上下文失败 - {ex.Message}");
+        }
+    }
+
     private void HandleNotification(byte[] data, string? messageFromDelegate, string sourceLabel)
     {
         try
@@ -583,7 +721,13 @@ public class ShinyBleService : IBleService
             if (TryMapButtonKey(message, data, out var key))
             {
                 _logger.LogInformation($"✅ 映射到按键事件: {key}");
+
+                // 触发 UI 层的按键事件（仅用于更新状态显示）
                 ButtonPressed?.Invoke(this, new ButtonEventArgs(key));
+
+                // 调用统一的按键处理方法（后台翻页 + 发送到设备）
+                _ = ProcessButtonAsync(key);
+
                 return;
             }
 

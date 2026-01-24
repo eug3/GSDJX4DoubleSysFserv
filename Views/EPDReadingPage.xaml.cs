@@ -385,85 +385,44 @@ public partial class EPDReadingPage : ContentPage
 
     /// <summary>
     /// 处理ESP32设备发送的按键事件
-    /// 
-    /// 关键逻辑（参考 BleReadBook/main.js）：
-    /// - ESP32 只在 文本末尾 时发送 0x81 (NEXT_PAGE) / 0x82 (PREV_PAGE)
-    /// - 其他时候是本地翻页，**不应该发送网络请求**
-    /// 
-    /// RIGHT/LEFT 的含义：
-    ///   • 0x81 (RIGHT): 当前页是最后一页 → 请求下一章
-    ///   • 0x82 (LEFT):  当前页是第一页 → 请求上一章
-    ///   • UP/DOWN:      中间页的本地翻页 → 不发送网络请求
+    ///
+    /// 架构说明：
+    /// - UI 层只负责更新状态显示
+    /// - 实际的翻页、数据获取、蓝牙发送都在 Service 层处理
+    /// - 这样确保息屏时也能正常工作
     /// </summary>
     private async void OnButtonPressed(object? sender, ButtonEventArgs e)
     {
-        System.Diagnostics.Debug.WriteLine($"🎯 ESP32 按键: {e.Key}");
+        System.Diagnostics.Debug.WriteLine($"🎯 UI 收到按键: {e.Key}");
 
-        switch (e.Key.ToUpper())
+        // 通知 Service 层处理按键（后台自动翻页 + 发送到设备）
+        await _bleService.ProcessButtonAsync(e.Key);
+
+        // UI 只负责更新状态显示
+        MainThread.BeginInvokeOnMainThread(() =>
         {
-            case "RIGHT":
-                // ✅ RIGHT = 0x81 = 页面已到末尾，请求下一章
-                System.Diagnostics.Debug.WriteLine("✅ RIGHT (0x81): 当前页是末尾，请求下一章");
-                MainThread.BeginInvokeOnMainThread(() =>
-                {
-                    if (!string.IsNullOrEmpty(_weReadService.State.CurrentUrl))
-                    {
-                        OnNextChapter(this, EventArgs.Empty);
-                    }
-                    else
-                    {
-                        SetStatus("未设置阅读 URL，无法获取下一章", true);
-                    }
-                });
-                break;
-
-            case "LEFT":
-                // ✅ LEFT = 0x82 = 页面已到开头，请求上一章
-                System.Diagnostics.Debug.WriteLine("✅ LEFT (0x82): 当前页是开头，请求上一章");
-                MainThread.BeginInvokeOnMainThread(() =>
-                {
-                    if (!string.IsNullOrEmpty(_weReadService.State.CurrentUrl))
-                    {
-                        OnPrevChapter(this, EventArgs.Empty);
-                    }
-                    else
-                    {
-                        SetStatus("未设置阅读 URL，无法获取上一章", true);
-                    }
-                });
-                break;
-
-            case "UP":
-                // ⚠️ UP = 本地滚动页面向上（不发送网络请求）
-                System.Diagnostics.Debug.WriteLine("⚠️  UP: 本地页面向上滚动");
-                MainThread.BeginInvokeOnMainThread(() =>
-                {
+            switch (e.Key.ToUpper())
+            {
+                case "RIGHT":
+                    SetStatus("📖 请求下一章...", false);
+                    break;
+                case "LEFT":
+                    SetStatus("📖 请求上一章...", false);
+                    break;
+                case "UP":
                     SetStatus("设备本地翻页: 向上", false);
-                });
-                break;
-
-            case "DOWN":
-                // ⚠️ DOWN = 本地滚动页面向下（不发送网络请求）
-                System.Diagnostics.Debug.WriteLine("⚠️  DOWN: 本地页面向下滚动");
-                MainThread.BeginInvokeOnMainThread(() =>
-                {
+                    break;
+                case "DOWN":
                     SetStatus("设备本地翻页: 向下", false);
-                });
-                break;
-
-            case "OK":
-            case "ENTER":
-                // ℹ️ OK = 确认/刷新
-                System.Diagnostics.Debug.WriteLine("ℹ️  OK: 刷新屏幕");
-                MainThread.BeginInvokeOnMainThread(() =>
-                {
+                    break;
+                case "OK":
+                case "ENTER":
                     SetStatus("设备请求刷新屏幕", false);
-                });
-                break;
-
-            default:
-                System.Diagnostics.Debug.WriteLine($"❓ 未知按键: {e.Key}");
-                break;
-        }
+                    break;
+                default:
+                    SetStatus($"收到按键: {e.Key}", false);
+                    break;
+            }
+        });
     }
 }

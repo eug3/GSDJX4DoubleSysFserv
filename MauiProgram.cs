@@ -21,14 +21,14 @@ public static class MauiProgram
         // 注册 Shiny.NET BluetoothLE (3.x API)
         builder.Services.AddBluetoothLE<ShinyBleDelegate>();
 
-        // 注册自定义服务
+        // 注册自定义服务（注意：依赖服务需要先注册）
         builder.Services.AddSingleton<IStorageService, StorageService>();
 
-        // 注册蓝牙服务 - 全面使用 Shiny.NET 3.x
-        builder.Services.AddSingleton<IBleService, ShinyBleService>();
-
-        // 注册微信读书服务
+        // 注册微信读书服务（ShinyBleService 依赖此服务，需要先注册）
         builder.Services.AddSingleton<IWeReadService, WeReadService>();
+
+        // 注册蓝牙服务 - 全面使用 Shiny.NET 3.x（依赖 IWeReadService）
+        builder.Services.AddSingleton<IBleService, ShinyBleService>();
 
         // 注册页面
         builder.Services.AddTransient<Views.WeReadPage>();

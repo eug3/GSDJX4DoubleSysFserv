@@ -23,5 +23,12 @@
             ContentTemplate="{DataTemplate views:SettingsPage}"
             Route="SettingsPage" />
     </FlyoutItem>
-
+    <FlyoutItem
+        Title="继续上次阅读"
+        Icon="epd.png">
+        <ShellContent
+            Title="继续上次阅读"
+            ContentTemplate="{DataTemplate views:EPDReadingPage}"
+            Route="EPDReadingPage" />
+    </FlyoutItem>
 </Shell>
