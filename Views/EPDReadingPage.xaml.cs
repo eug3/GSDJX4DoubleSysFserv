@@ -104,20 +104,12 @@ public partial class EPDReadingPage : ContentPage
     }
 
     /// <summary>
-    /// 处理连接状态变化事件 - 当设备连接时自动发送当前内容
+    /// 处理连接状态变化事件 - 仅更新 UI 状态，不自动发送
     /// </summary>
-    private async void OnConnectionStateChanged(object? sender, ConnectionStateChangedEventArgs e)
+    private void OnConnectionStateChanged(object? sender, ConnectionStateChangedEventArgs e)
     {
-        if (e.IsConnected)
-        {
-            System.Diagnostics.Debug.WriteLine($"EPDReading: 设备已连接 - {e.DeviceName}，尝试自动发送当前内容");
-            UpdateConnectionStatus();
-            await AutoSendCurrentContentAsync();
-        }
-        else
-        {
-            UpdateConnectionStatus();
-        }
+        System.Diagnostics.Debug.WriteLine($"EPDReading: 连接状态变化 - {(e.IsConnected ? "已连接" : "已断开")} {e.DeviceName}");
+        UpdateConnectionStatus();
     }
 
     private void UpdateConnectionStatus()

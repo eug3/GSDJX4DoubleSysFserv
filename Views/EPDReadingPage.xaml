@@ -23,7 +23,7 @@
                         Clicked="OnPrevChapter" />
                 <Button Grid.Column="1"
                         x:Name="CurrentPageBtn"
-                        Text="📖 获取当前页"
+                        Text="📖 传输当前页面"
                         BackgroundColor="#07C160"
                         TextColor="#ffffff"
                         CornerRadius="5"
@@ -89,7 +89,7 @@
                     FontFamily="Courier New"
                     FontSize="14"
                     IsReadOnly="True"
-                    Placeholder="文本内容将在这里显示...&#10;&#10;点击「获取当前页」开始阅读" />
+                    Placeholder="文本内容将在这里显示..." />
         </Frame>
 
   

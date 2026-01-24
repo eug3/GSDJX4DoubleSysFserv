@@ -40,6 +40,22 @@ public interface IBleService
     Task<bool> SendTextToDeviceAsync(string text, int chapter = 0);
 
     /// <summary>
+    /// 手动发送 EOF 标记到设备
+    /// </summary>
+    /// <returns>是否发送成功</returns>
+    Task<bool> SendEofAsync();
+
+    /// <summary>
+    /// 发送图片到设备（X4IM v2）
+    /// </summary>
+    /// <param name="imageData">图片二进制数据（PNG/BMP 等）</param>
+    /// <param name="fileName">文件名，例如 page_0.png</param>
+    /// <param name="flags">X4IM 文件类型标志，如 X4IMProtocol.FLAG_TYPE_PNG</param>
+    /// <param name="sendShowPage">是否发送 SHOW_PAGE 命令触发显示</param>
+    /// <param name="pageIndex">SHOW_PAGE 页面索引</param>
+    Task<bool> SendImageToDeviceAsync(byte[] imageData, string fileName = "page_0.png", ushort flags = X4IMProtocol.FLAG_TYPE_PNG, bool sendShowPage = true, byte pageIndex = 0);
+
+    /// <summary>
     /// 按键事件委托
     /// </summary>
     event EventHandler<ButtonEventArgs>? ButtonPressed;

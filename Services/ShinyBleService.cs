@@ -995,39 +995,13 @@ public class ShinyBleService : IBleService
                 var header = CreateX4IMv2Header(data.Length, 0, bookId);
                 _logger.LogInformation($"BLE: 发送文件 bookId=\"{bookId}\", size={data.Length} 字节");
 
-                if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
+                var sent = await SendFrameAsync(header, data, appendEof: true);
+                if (sent)
                 {
-                    await CacheWriteCharacteristicAsync();
+                    _logger.LogInformation($"BLE: 文件传输完成（含 EOF）! {data.Length + X4IMProtocol.EOF_MARKER.Length} 字节");
                 }
 
-                if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
-                {
-                    _logger.LogError("BLE: 无法找到写入特征值");
-                    return false;
-                }
-
-                // 第一步：发送 header + 数据
-                using var ms = new MemoryStream();
-                ms.Write(header, 0, header.Length);
-                ms.Write(data, 0, data.Length);
-                ms.Position = 0;
-
-                await _connectedPeripheral!
-                    .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, ms)
-                    .LastOrDefaultAsync();
-
-                _logger.LogInformation($"BLE: 文件数据传输完成! {data.Length} 字节");
-
-                // 第二步：单独发送 EOF 标记（关键！）
-                await Task.Delay(50);
-                var eofMarker = new byte[] { 0x00, 0x45, 0x4F, 0x46, 0x0A };
-                await _connectedPeripheral!
-                    .WriteCharacteristic(_writeServiceUuid, _writeCharacteristicUuid, eofMarker)
-                    .FirstAsync();
-
-                _logger.LogInformation("BLE: 已发送 EOF 标记，触发 ESP32 显示");
-
-                return true;
+                return sent;
             }
             catch (Exception ex)
             {
@@ -1047,9 +1021,96 @@ public class ShinyBleService : IBleService
     }
 
     /// <summary>
+    /// 手动发送 EOF 标记到设备
+    /// </summary>
+    public async Task<bool> SendEofAsync()
+    {
+        if (!IsConnected || _connectedPeripheral == null)
+        {
+            _logger.LogWarning("BLE: 设备未连接，无法发送 EOF");
+            return false;
+        }
+
+        if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
+        {
+            await CacheWriteCharacteristicAsync();
+        }
+
+        if (_writeServiceUuid == null || _writeCharacteristicUuid == null || _connectedPeripheral == null)
+        {
+            _logger.LogError("BLE: 无法找到写入特征值");
+            return false;
+        }
+
+        try
+        {
+            _logger.LogInformation("BLE: 手动发送 EOF 标记");
+            
+            using var ms = new MemoryStream();
+            ms.Write(X4IMProtocol.EOF_MARKER, 0, X4IMProtocol.EOF_MARKER.Length);
+            ms.Position = 0;
+
+            await _connectedPeripheral
+                .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, ms)
+                .LastOrDefaultAsync();
+
+            _logger.LogInformation($"BLE: EOF 发送完成 ({X4IMProtocol.EOF_MARKER.Length} 字节)");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"BLE: 发送 EOF 失败 - {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 发送图片到设备（X4IM v2 协议，默认 PNG，不追加 EOF）
+    /// </summary>
+    public async Task<bool> SendImageToDeviceAsync(byte[] imageData, string fileName = "page_0.png", ushort flags = X4IMProtocol.FLAG_TYPE_PNG, bool sendShowPage = true, byte pageIndex = 0)
+    {
+        if (!IsConnected || _connectedPeripheral == null)
+        {
+            _logger.LogWarning("BLE: 设备未连接，无法发送图片");
+            return false;
+        }
+
+        if (imageData == null || imageData.Length == 0)
+        {
+            _logger.LogWarning("BLE: 图片数据为空");
+            return false;
+        }
+
+        try
+        {
+            var header = CreateX4IMv2Header(imageData.Length, 0, fileName, flags);
+            _logger.LogInformation($"BLE: 发送图片 file=\"{fileName}\" size={imageData.Length} 字节 flags=0x{flags:X4}");
+
+            var sent = await SendFrameAsync(header, imageData, appendEof: false);
+            if (!sent)
+            {
+                return false;
+            }
+
+            if (sendShowPage)
+            {
+                // 默认沿用 SHOW_PAGE 命令触发刷新
+                await SendCommandAsync(X4IMProtocol.CMD_SHOW_PAGE, new byte[] { pageIndex });
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"BLE: 发送图片失败 - {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 创建 X4IM v2 协议帧头
     /// </summary>
-    private static byte[] CreateX4IMv2Header(int payloadSize, int sd, string name)
+    private static byte[] CreateX4IMv2Header(int payloadSize, int sd, string name, ushort flags = X4IMProtocol.FLAG_TYPE_TXT)
     {
         var header = new byte[32];
 
@@ -1063,9 +1124,9 @@ public class ShinyBleService : IBleService
         header[4] = 0x02;
         header[5] = 0x00;
 
-        // Flags: 0x0004 (TXT 标志位，小端序)
-        header[6] = 0x04;
-        header[7] = 0x00;
+        // Flags (小端序)
+        header[6] = (byte)(flags & 0xFF);
+        header[7] = (byte)((flags >> 8) & 0xFF);
 
         // Payload size (小端序)
         header[8] = (byte)(payloadSize & 0xFF);
@@ -1089,6 +1150,71 @@ public class ShinyBleService : IBleService
         }
 
         return header;
+    }
+
+    private async Task<bool> SendFrameAsync(byte[] header, byte[] payload, bool appendEof)
+    {
+        if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
+        {
+            await CacheWriteCharacteristicAsync();
+        }
+
+        if (_writeServiceUuid == null || _writeCharacteristicUuid == null || _connectedPeripheral == null)
+        {
+            _logger.LogError("BLE: 无法找到写入特征值");
+            return false;
+        }
+
+        using var ms = new MemoryStream();
+        ms.Write(header, 0, header.Length);
+        ms.Write(payload, 0, payload.Length);
+
+        if (appendEof)
+        {
+            ms.Write(X4IMProtocol.EOF_MARKER, 0, X4IMProtocol.EOF_MARKER.Length);
+        }
+
+        ms.Position = 0;
+
+        await _connectedPeripheral
+            .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, ms)
+            .LastOrDefaultAsync();
+
+        return true;
+    }
+
+    private async Task<bool> SendCommandAsync(byte command, byte[]? payload = null)
+    {
+        if (!IsConnected || _connectedPeripheral == null)
+        {
+            return false;
+        }
+
+        if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
+        {
+            await CacheWriteCharacteristicAsync();
+        }
+
+        if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
+        {
+            _logger.LogError("BLE: 无法找到写入特征值");
+            return false;
+        }
+
+        var length = 1 + (payload?.Length ?? 0);
+        var buffer = new byte[length];
+        buffer[0] = command;
+        if (payload is { Length: > 0 })
+        {
+            Array.Copy(payload, 0, buffer, 1, payload.Length);
+        }
+
+        using var ms = new MemoryStream(buffer);
+        await _connectedPeripheral
+            .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, ms)
+            .LastOrDefaultAsync();
+
+        return true;
     }
 
     public async Task<ObservableCollection<BleDeviceInfo>> ScanDevicesAsync()

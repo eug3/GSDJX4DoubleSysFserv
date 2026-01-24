@@ -175,6 +175,9 @@ public partial class WeReadPage : ContentPage
     {
         // 执行登录点击操作
         await PerformLoginClick();
+
+        // 弹出二维码后尝试推送到 EPD 设备
+        await TrySendLoginQrAsync();
     }
 
     private async Task PerformLoginClick()
@@ -246,6 +249,155 @@ public partial class WeReadPage : ContentPage
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"PerformLoginClick error: {ex.Message}");
+        }
+    }
+
+    private async Task TrySendLoginQrAsync()
+    {
+        try
+        {
+            if (!_bleService.IsConnected)
+            {
+                System.Diagnostics.Debug.WriteLine("WeRead: 蓝牙未连接，跳过二维码推送");
+                return;
+            }
+
+            const string script = "(function() {\n" +
+                "    function findSource(doc) {\n" +
+                "        try {\n" +
+                "            var img = doc.querySelector('img[alt=\"登录二维码\"]');\n" +
+                "            if (img && img.src) return { node: img, src: img.src, w: img.naturalWidth || img.width || 0, h: img.naturalHeight || img.height || 0 };\n" +
+                "            var canvas = doc.querySelector('canvas');\n" +
+                "            if (canvas && canvas.toDataURL) return { node: canvas, src: canvas.toDataURL('image/png'), w: canvas.width, h: canvas.height };\n" +
+                "        } catch (_) {}\n" +
+                "        return null;\n" +
+                "    }\n" +
+                "    function toBmp1bit(srcInfo) {\n" +
+                "        var dataUrl = srcInfo.src;\n" +
+                "        var w = srcInfo.w || 0;\n" +
+                "        var h = srcInfo.h || 0;\n" +
+                "        if (!dataUrl || !w || !h) return null;\n" +
+                "        var canvas = document.createElement('canvas');\n" +
+                "        canvas.width = w;\n" +
+                "        canvas.height = h;\n" +
+                "        var ctx = canvas.getContext('2d');\n" +
+                "        if (srcInfo.node && srcInfo.node.tagName === 'CANVAS') {\n" +
+                "            ctx.drawImage(srcInfo.node, 0, 0);\n" +
+                "        } else {\n" +
+                "            var img = document.createElement('img');\n" +
+                "            img.src = dataUrl;\n" +
+                "            ctx.drawImage(img, 0, 0, w, h);\n" +
+                "        }\n" +
+                "        var imgData = ctx.getImageData(0, 0, w, h).data;\n" +
+                "        var rowSize = Math.ceil(w / 32) * 4;\n" +
+                "        var sizeImage = rowSize * h;\n" +
+                "        var fileSize = 14 + 40 + 8 + sizeImage;\n" +
+                "        var buffer = new Uint8Array(fileSize);\n" +
+                "        var dv = new DataView(buffer.buffer);\n" +
+                "        buffer[0] = 0x42;\n" +
+                "        buffer[1] = 0x4D;\n" +
+                "        dv.setUint32(2, fileSize, true);\n" +
+                "        dv.setUint32(10, 14 + 40 + 8, true);\n" +
+                "        dv.setUint32(14, 40, true);\n" +
+                "        dv.setInt32(18, w, true);\n" +
+                "        dv.setInt32(22, -h, true);\n" +
+                "        dv.setUint16(26, 1, true);\n" +
+                "        dv.setUint16(28, 1, true);\n" +
+                "        dv.setUint32(30, 0, true);\n" +
+                "        dv.setUint32(34, sizeImage, true);\n" +
+                "        dv.setUint32(38, 2835, true);\n" +
+                "        dv.setUint32(42, 2835, true);\n" +
+                "        dv.setUint32(46, 2, true);\n" +
+                "        dv.setUint32(50, 2, true);\n" +
+                "        var paletteOffset = 14 + 40;\n" +
+                "        buffer[paletteOffset + 0] = 0x00;\n" +
+                "        buffer[paletteOffset + 1] = 0x00;\n" +
+                "        buffer[paletteOffset + 2] = 0x00;\n" +
+                "        buffer[paletteOffset + 3] = 0x00;\n" +
+                "        buffer[paletteOffset + 4] = 0xFF;\n" +
+                "        buffer[paletteOffset + 5] = 0xFF;\n" +
+                "        buffer[paletteOffset + 6] = 0xFF;\n" +
+                "        buffer[paletteOffset + 7] = 0x00;\n" +
+                "        var dataOffset = paletteOffset + 8;\n" +
+                "        var dst = buffer;\n" +
+                "        for (var y = 0; y < h; y++) {\n" +
+                "            var rowStart = dataOffset + y * rowSize;\n" +
+                "            var bitPos = 7;\n" +
+                "            var byteVal = 0;\n" +
+                "            for (var x = 0; x < w; x++) {\n" +
+                "                var idx = (y * w + x) * 4;\n" +
+                "                var r = imgData[idx];\n" +
+                "                var g = imgData[idx + 1];\n" +
+                "                var b = imgData[idx + 2];\n" +
+                "                var lum = (r + g + b) / 3;\n" +
+                "                var bit = lum < 128 ? 0 : 1;\n" +
+                "                byteVal |= (bit << bitPos);\n" +
+                "                bitPos--;\n" +
+                "                if (bitPos < 0) {\n" +
+                "                    dst[rowStart++] = byteVal;\n" +
+                "                    byteVal = 0;\n" +
+                "                    bitPos = 7;\n" +
+                "                }\n" +
+                "            }\n" +
+                "            if (bitPos !== 7) {\n" +
+                "                dst[rowStart] = byteVal;\n" +
+                "            }\n" +
+                "        }\n" +
+                "        var binary = '';\n" +
+                "        for (var i = 0; i < buffer.length; i++) {\n" +
+                "            binary += String.fromCharCode(buffer[i]);\n" +
+                "        }\n" +
+                "        return 'data:image/bmp;base64,' + btoa(binary);\n" +
+                "    }\n" +
+                "    var src = findSource(document);\n" +
+                "    if (!src) {\n" +
+                "        var frame = document.querySelector('iframe');\n" +
+                "        if (frame && frame.contentWindow && frame.contentWindow.document) {\n" +
+                "            src = findSource(frame.contentWindow.document);\n" +
+                "        }\n" +
+                "    }\n" +
+                "    if (!src) return null;\n" +
+                "    return toBmp1bit(src);\n" +
+                "})();";
+
+            string? dataUrl = null;
+            for (var i = 0; i < 6 && string.IsNullOrEmpty(dataUrl); i++)
+            {
+                dataUrl = await WebView.EvaluateJavaScriptAsync(script);
+                if (string.IsNullOrEmpty(dataUrl))
+                {
+                    await Task.Delay(500);
+                }
+            }
+
+            if (string.IsNullOrEmpty(dataUrl))
+            {
+                System.Diagnostics.Debug.WriteLine("WeRead: 未获取到登录二维码");
+                return;
+            }
+
+            var commaIndex = dataUrl.IndexOf(',');
+            var base64 = commaIndex >= 0 ? dataUrl.Substring(commaIndex + 1) : dataUrl;
+
+            byte[] imageBytes;
+            try
+            {
+                imageBytes = Convert.FromBase64String(base64);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"WeRead: 二维码 Base64 解析失败 - {ex.Message}");
+                return;
+            }
+
+            var sent = await _bleService.SendImageToDeviceAsync(imageBytes, "page_0.bmp", X4IMProtocol.FLAG_TYPE_BMP, true, 0);
+            System.Diagnostics.Debug.WriteLine(sent
+                ? $"WeRead: 已发送登录二维码到设备 ({imageBytes.Length} 字节)"
+                : "WeRead: 发送登录二维码失败");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"WeRead: 推送二维码失败 - {ex.Message}");
         }
     }
 }
