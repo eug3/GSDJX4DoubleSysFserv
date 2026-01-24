@@ -46,7 +46,6 @@
                             <DataTemplate>
                                 <Border Padding="10"
                                         Margin="0,5"
-                                        BackgroundColor="White"
                                         StrokeThickness="0"
                                         StrokeShape="RoundRectangle 5">
                                     <Grid ColumnDefinitions="*,Auto"

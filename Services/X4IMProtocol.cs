@@ -6,20 +6,24 @@ namespace GSDJX4DoubleSysFserv.Services;
 /// <summary>
 /// X4IM v2 协议实现
 /// 
-/// 协议格式 (ESP32 端实际使用的格式):
-/// v2 帧头 (32 字节):
-///   magic (4字节)     = "X4IM" (0x58 0x34 0x49 0x4D)
-///   version (2字节)   = 0x0002 (小端序)
-///   flags (2字节)     = 0x0004 (TXT标志位，小端序)
-///   payload_size (4字节) = 数据大小 (小端序)
-///   sd (4字节)        = 存储标识: 0=littlefs, 1=SD卡 (小端序)
-///   name (16字节)     = 书籍ID字符串（UTF-8，以\0结尾）
+/// 协议格式 (ESP32 端当前解析的 v2 帧头，32 字节):
+///   magic (4B)   = "X4IM"
+///   version (1B) = 0x02
+///   type   (1B)  = 文件类型（BMP/JPG/TXT 等）
+///   flags  (2B)  = 文件标志位（如 TXT=0x0004, BMP=0x0020）
+///   payload_size (4B, LE) = 数据大小（不含 EOF）
+///   sd/seq (4B, LE)       = 固件当前用于存储/序号，保留 0 即可
+///   name (16B)            = UTF-8 文件名/书籍 ID（最多 15B，\0 结尾）
 /// 
 /// 数据部分:
 ///   直接发送原始数据（TXT文本等）
 ///   可以分多次发送，ESP32 会自动拼接
+///   payload_size 不包含 EOF 标记大小
 /// 
-/// 传输完成后需要发送 EOF 标记：0x00 0x45 0x4F 0x46 0x0A (\x00EOF\n)
+/// EOF 标记（仅用于 TXT）:
+///   传输完成后单独发送：0x00 0x45 0x4F 0x46 0x0A (\x00EOF\n)
+///   或缩短版：0x00 0x45 0x4F 0x46 (\x00EOF，不含 \n)
+///   ESP32 根据这个标记触发文件显示（BMP/PNG 不需要 EOF）
 /// </summary>
 public static class X4IMProtocol
 {
@@ -73,11 +77,12 @@ public static class X4IMProtocol
     /// <summary>
     /// 创建 X4IM v2 协议帧头
     /// </summary>
-    /// <param name="payloadSize">数据大小（字节）</param>
-    /// <param name="bookId">书籍ID（最多15字符）</param>
+    /// <param name="payloadSize">数据大小（字节，不含 EOF）</param>
+    /// <param name="bookId">文件名/书籍ID（最多15字符）</param>
     /// <param name="sd">存储标识：0=littlefs, 1=SD卡</param>
-    /// <returns>32字节的帧头</returns>
-    public static byte[] CreateHeader(uint payloadSize, string bookId = "", uint sd = 0)
+    /// <param name="flags">文件标志位（默认 TXT）</param>
+    /// <returns>32 字节的帧头</returns>
+    public static byte[] CreateHeader(uint payloadSize, string bookId = "", uint sd = 0, ushort flags = FLAG_TYPE_TXT)
     {
         var header = new byte[32];
 
@@ -87,13 +92,13 @@ public static class X4IMProtocol
         header[2] = 0x49;
         header[3] = 0x4D;
 
-        // Version: 0x0002 (小端序)
+        // Version + Type（保持与 ESP32 解析一致: version 在 [4]，type 在 [5]）
         header[4] = 0x02;
-        header[5] = 0x00;
+        header[5] = FlagsToType(flags);
 
-        // Flags: 0x0004 (TXT标志位，小端序)
-        header[6] = 0x04;
-        header[7] = 0x00;
+        // Flags（小端序）
+        header[6] = (byte)(flags & 0xFF);
+        header[7] = (byte)((flags >> 8) & 0xFF);
 
         // Payload size (小端序)
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(8, 4), payloadSize);
@@ -121,7 +126,7 @@ public static class X4IMProtocol
     public static byte[] CreateTxtFrame(string text, string bookId = "", uint sd = 0)
     {
         var textBytes = Encoding.UTF8.GetBytes(text);
-        var header = CreateHeader((uint)textBytes.Length, bookId, sd);
+        var header = CreateHeader((uint)textBytes.Length, bookId, sd, FLAG_TYPE_TXT);
         
         var frame = new byte[32 + textBytes.Length];
         Array.Copy(header, 0, frame, 0, 32);
@@ -137,7 +142,7 @@ public static class X4IMProtocol
     {
         var chunks = new List<byte[]>();
         var textBytes = Encoding.UTF8.GetBytes(text);
-        var header = CreateHeader((uint)textBytes.Length, bookId, sd);
+        var header = CreateHeader((uint)textBytes.Length, bookId, sd, FLAG_TYPE_TXT);
 
         // 第一个分包：帧头 + 部分数据
         int firstChunkDataSize = Math.Min(chunkSize - 32, textBytes.Length);
@@ -159,5 +164,19 @@ public static class X4IMProtocol
         }
 
         return chunks;
+    }
+
+    /// <summary>
+    /// 从 flags 推导协议 type 字节（保持与 ESP32 侧一致）。
+    /// </summary>
+    private static byte FlagsToType(ushort flags)
+    {
+        if ((flags & FLAG_TYPE_BMP) != 0) return TYPE_BMP;
+        if ((flags & FLAG_TYPE_PNG) != 0) return TYPE_PNG;
+        if ((flags & FLAG_TYPE_JPG) != 0) return TYPE_JPG;
+        if ((flags & FLAG_TYPE_TXT) != 0) return TYPE_TXT;
+        if ((flags & FLAG_TYPE_EPUB) != 0) return TYPE_EPUB;
+        if ((flags & FLAG_TYPE_PDF) != 0) return TYPE_PDF;
+        return TYPE_BINARY;
     }
 }

@@ -968,8 +968,15 @@ public class ShinyBleService : IBleService
     }
 
     /// <summary>
-    /// 发送文本到设备（X4IM v2 协议）
+    /// 发送文本到设备（X4IM v2 协议 + EOF 标记）
     /// </summary>
+    /// <remarks>
+    /// TXT 协议流程：
+    /// 1. 发送 X4IM v2 帧头（32B）+ TXT 数据（不含 EOF）
+    /// 2. 短暂延迟后，单独发送 EOF 标记（0x00 0x45 0x4F 0x46 0x0A）
+    /// 3. ESP32 接收到 EOF 时触发文件写入和显示
+    /// 注：帧头中的 payload_size 只表示 TXT 数据大小，不含 EOF
+    /// </remarks>
     public async Task<bool> SendTextToDeviceAsync(string text, int chapter = 0)
     {
         if (!IsConnected || _connectedPeripheral == null)
@@ -992,16 +999,22 @@ public class ShinyBleService : IBleService
             {
                 var data = Encoding.UTF8.GetBytes(text);
                 var bookId = $"weread_{chapter}";
-                var header = CreateX4IMv2Header(data.Length, 0, bookId);
-                _logger.LogInformation($"BLE: 发送文件 bookId=\"{bookId}\", size={data.Length} 字节");
+                var header = CreateX4IMv2Header(data.Length, 0, bookId, X4IMProtocol.FLAG_TYPE_TXT);
+                _logger.LogInformation($"BLE: 发送 TXT bookId=\"{bookId}\", size={data.Length} 字节");
 
-                var sent = await SendFrameAsync(header, data, appendEof: true);
-                if (sent)
+                // 步骤 1: 发送帧头 + 数据（不含 EOF）
+                var sent = await SendFrameAsync(header, data, appendEof: false);
+                if (!sent)
                 {
-                    _logger.LogInformation($"BLE: 文件传输完成（含 EOF）! {data.Length + X4IMProtocol.EOF_MARKER.Length} 字节");
+                    return false;
                 }
 
-                return sent;
+                // 步骤 2: 发送 EOF 标记（单独发送）
+                await Task.Delay(50);
+                await SendEofAsync();
+                _logger.LogInformation($"BLE: TXT 传输完成，已发送 EOF 标记");
+
+                return true;
             }
             catch (Exception ex)
             {
@@ -1045,14 +1058,10 @@ public class ShinyBleService : IBleService
         try
         {
             _logger.LogInformation("BLE: 手动发送 EOF 标记");
-            
-            using var ms = new MemoryStream();
-            ms.Write(X4IMProtocol.EOF_MARKER, 0, X4IMProtocol.EOF_MARKER.Length);
-            ms.Position = 0;
-
+            // 历史实现：EOF 使用单次写入（非 blob）更可靠，ESP32 端据此触发显示
             await _connectedPeripheral
-                .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, ms)
-                .LastOrDefaultAsync();
+                .WriteCharacteristic(_writeServiceUuid, _writeCharacteristicUuid, X4IMProtocol.EOF_MARKER)
+                .FirstOrDefaultAsync();
 
             _logger.LogInformation($"BLE: EOF 发送完成 ({X4IMProtocol.EOF_MARKER.Length} 字节)");
             return true;
@@ -1154,6 +1163,14 @@ public class ShinyBleService : IBleService
 
     private async Task<bool> SendFrameAsync(byte[] header, byte[] payload, bool appendEof)
     {
+        /// <remarks>
+        /// 发送 X4IM v2 帧（header + payload）到 BLE 设备。
+        /// 
+        /// 对于 TXT 文件：必须设置 appendEof=false，然后在此方法之后单独调用 SendEofAsync()
+        /// 对于 BMP/PNG 等：设置 appendEof=false（不需要 EOF），使用 SendCommandAsync(SHOW_PAGE) 代替
+        /// 
+        /// 注意：appendEof 参数已弃用，应始终为 false。EOF 必须单独发送以确保协议清晰性。
+        /// </remarks>
         if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
         {
             await CacheWriteCharacteristicAsync();
@@ -1171,6 +1188,7 @@ public class ShinyBleService : IBleService
 
         if (appendEof)
         {
+            _logger.LogWarning("BLE: appendEof=true 已弃用！EOF 应单独通过 SendEofAsync() 发送");
             ms.Write(X4IMProtocol.EOF_MARKER, 0, X4IMProtocol.EOF_MARKER.Length);
         }
 
