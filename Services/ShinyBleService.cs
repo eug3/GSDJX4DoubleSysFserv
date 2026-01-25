@@ -994,54 +994,10 @@ public class ShinyBleService : IBleService
 
     public async Task<bool> SendImageToDeviceAsync(byte[] imageData, string fileName = "page_0.bmp", ushort flags = X4IMProtocol.FLAG_TYPE_BMP, bool sendShowPage = true, byte pageIndex = 0)
     {
-#if ANDROID
-        // Android 平台禁用图片发送逻辑
-        _logger.LogWarning("BLE: Android 平台已禁用发送图片逻辑");
+        // 所有平台禁用图片发送，仅发送文字
+        _logger.LogInformation("BLE: 图片发送已禁用，仅支持文字传输");
         await Task.CompletedTask;
         return false;
-#else
-        if (!IsConnected || _connectedPeripheral == null)
-        {
-            _logger.LogWarning("BLE: 设备未连接，无法发送图片");
-            return false;
-        }
-
-        if (imageData == null || imageData.Length == 0)
-        {
-            _logger.LogWarning("BLE: 图片数据为空");
-            return false;
-        }
-
-        if (flags == X4IMProtocol.FLAG_TYPE_TXT)
-        {
-            _logger.LogError("BLE: 发送图片时不应使用 TXT 类型标志！");
-            return false;
-        }
-
-        try
-        {
-            var header = X4IMProtocol.CreateHeader((uint)imageData.Length, fileName, 0, flags);
-            _logger.LogInformation($"BLE: 发送图片 file=\"{fileName}\" size={imageData.Length} 字节 type=0x{header[5]:X2} flags=0x{flags:X4} (期望 BMP + 固定文件名)");
-
-            var sent = await SendFrameAsync(header, imageData, appendEof: false);
-            if (!sent)
-            {
-                return false;
-            }
-
-            if (sendShowPage)
-            {
-                await SendCommandAsync(X4IMProtocol.CMD_SHOW_PAGE, X4IMProtocol.CreateShowPageCommand(pageIndex));
-            }
-
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError($"BLE: 发送图片失败 - {ex.Message}");
-            return false;
-        }
-#endif
     }
 
     private async Task<bool> SendFrameAsync(byte[] header, byte[] payload, bool appendEof)
