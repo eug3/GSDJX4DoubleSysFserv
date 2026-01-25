@@ -1326,38 +1326,43 @@ public class ShinyBleService : IBleService
 #if IOS
     /// <summary>
     /// 启动 iOS 后台任务（iOS 专用）
+    /// 
+    /// 混合方案：
+    /// 1. 主要依赖 UIBackgroundModes: bluetooth-central（Info.plist 已配置）
+    ///    - 无时间限制，系统自动管理
+    ///    - 只要 BLE 连接存在就在后台运行
+    /// 
+    /// 2. 辅助使用 BeginBackgroundTask 作为备份
+    ///    - 在 bluetooth-central 可能不足时自动续期
+    ///    - 提供额外的保障层
+    /// 
     /// 对应 Android 前台服务
     /// </summary>
     private void StartIosBackgroundTask()
     {
         try
         {
-            // 如果已有后台任务在运行，先结束它
-            if (_bgTaskId != 0)
+            if (_bgTaskId == 0)
             {
-                UIApplication.SharedApplication.EndBackgroundTask(_bgTaskId);
-                _bgTaskId = 0;
-            }
-
-            // 启动新的后台任务
-            _bgTaskId = UIApplication.SharedApplication.BeginBackgroundTask("BLEConnection", () =>
-            {
-                // 系统即将结束后台任务时的回调
+                // BeginBackgroundTask 作为辅助备份
+                // 在 bluetooth-central 过期时自动续期
+                _bgTaskId = UIApplication.SharedApplication.BeginBackgroundTask("BLEConnection", () =>
+                {
+                    _logger.LogWarning("BLE: iOS BeginBackgroundTask 快过期，自动续期");
+                    // 自动续期而不是简单结束
+                    StopIosBackgroundTask();
+                    StartIosBackgroundTask();
+                });
+                
                 if (_bgTaskId != 0)
                 {
-                    UIApplication.SharedApplication.EndBackgroundTask(_bgTaskId);
-                    _bgTaskId = 0;
+                    _logger.LogInformation("BLE: iOS 后台运行已启动 (主模式: bluetooth-central, 备模式: BeginBackgroundTask)");
                 }
-            });
-
-            if (_bgTaskId != 0)
-            {
-                _logger.LogInformation("BLE: iOS 后台任务已启动");
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning($"BLE: 启动后台任务失败 - {ex.Message}");
+            _logger.LogWarning($"BLE: 启动后台任务失败 - {ex.Message}。继续运行，bluetooth-central 模式会接管");
         }
     }
 
