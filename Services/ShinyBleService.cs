@@ -40,6 +40,7 @@ public class ShinyBleService : IBleService
     private TaskCompletionSource<ObservableCollection<BleDeviceInfo>>? _scanTcs;
     private IDisposable? _scanSubscription;
     private IDisposable? _notifySubscription;
+    private IDisposable? _statusSubscription;
     private static readonly Dictionary<byte, string> CommandButtonMap = new()
     {
         { X4IMProtocol.CMD_NEXT_PAGE, "RIGHT" },
@@ -90,6 +91,9 @@ public class ShinyBleService : IBleService
             IsConnected = true;
             ConnectedDeviceName = e.Peripheral.Name ?? "未知设备";
             
+            // 给设备足够的时间来初始化特征（特别是设备刚重启时）
+            await Task.Delay(1500);
+            
 #if IOS
             // 重新启动后台任务，防止系统已关闭
             StartIosBackgroundTask();
@@ -100,6 +104,7 @@ public class ShinyBleService : IBleService
             
             await CacheWriteCharacteristicAsync();
             await SubscribeToNotificationsAsync();
+            SetupDisconnectionHandler();
             
             // 协商 MTU
             NegotiateMtuAsync();
@@ -151,14 +156,16 @@ public class ShinyBleService : IBleService
         {
             _logger.LogInformation("BLE: Android 请求 MTU 517...");
             var result = await _connectedPeripheral.TryRequestMtuAsync(517);
-            _logger.LogInformation($"BLE: Android MTU 请求结果 = {result}");
+            _negotiatedMtu = Math.Max(result, 23);
+            _logger.LogInformation($"BLE: Android MTU 请求结果 = {_negotiatedMtu}");
         }
         catch (Exception ex)
         {
             _logger.LogWarning($"BLE: Android MTU 请求失败 - {ex.Message}");
         }
 #else
-        _logger.LogInformation($"BLE: iOS MTU 使用系统协商值（默认 {_negotiatedMtu} 字节）");
+        _negotiatedMtu = Math.Max(_connectedPeripheral.Mtu, 23);
+        _logger.LogInformation($"BLE: iOS MTU 使用系统协商值 {_negotiatedMtu} 字节");
 #endif
     }
 
@@ -301,6 +308,8 @@ public class ShinyBleService : IBleService
         
         _notifySubscription?.Dispose();
         _notifySubscription = null;
+        _statusSubscription?.Dispose();
+        _statusSubscription = null;
         _writeServiceUuid = null;
         _writeCharacteristicUuid = null;
         _negotiatedMtu = 23; // BLE 默认值，系统会自行协商
@@ -449,6 +458,9 @@ public class ShinyBleService : IBleService
 
             NotifyConnectionStateChanged(true, ConnectedDeviceName, ConnectionChangeReason.UserInitiated);
 
+            // 给设备足够的时间来初始化特征
+            await Task.Delay(500);
+
 #if IOS
             // 启动后台任务，对应 Android 前台服务
             StartIosBackgroundTask();
@@ -483,7 +495,9 @@ public class ShinyBleService : IBleService
     {
         if (_connectedPeripheral == null) return;
 
-        _connectedPeripheral
+        _statusSubscription?.Dispose();
+
+        _statusSubscription = _connectedPeripheral
             .WhenStatusChanged()
             .Subscribe(async state =>
             {
@@ -513,8 +527,11 @@ public class ShinyBleService : IBleService
                 else if (state == ConnectionState.Connected && !IsConnected)
                 {
                     // 自动重连成功，重新初始化
-                    _logger.LogInformation("BLE: 自动重连成功，重新初始化...");
+                    _logger.LogInformation("BLE: 自动重连成功，正在等待设备就绪...");
                     IsConnected = true;
+                    
+                    // 给设备足够的时间来初始化特征（特别是设备刚重启时）
+                    await Task.Delay(1000);
                     
 #if IOS
                     // 重新启动后台任务，防止系统已关闭
@@ -540,57 +557,91 @@ public class ShinyBleService : IBleService
     {
         if (_connectedPeripheral == null) return;
 
-        try
+        // 重试机制：最多尝试 3 次，每次间隔 500ms
+        // 这是为了处理设备重启后特征可能还未就绪的情况
+        const int maxRetries = 3;
+        const int retryDelayMs = 500;
+        
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            _notifySubscription?.Dispose();
-
-            var allCharacteristics = await _connectedPeripheral
-                .GetAllCharacteristics()
-                .FirstAsync();
-
-            _logger.LogInformation($"BLE: 搜索可通知特征，共 {allCharacteristics.Count} 个特征");
-
-            static bool IsExcludedService(string uuid)
+            try
             {
-                var u = uuid.ToLowerInvariant();
-                return u == "00001800-0000-1000-8000-00805f9b34fb"
-                    || u == "00001801-0000-1000-8000-00805f9b34fb";
-            }
+                _notifySubscription?.Dispose();
+                _notifySubscription = null;
 
-            var notifyChar = allCharacteristics.FirstOrDefault(ch =>
-                !IsExcludedService(ch.Service.Uuid) &&
-                (ch.Properties.HasFlag(CharacteristicProperties.Notify) ||
-                 ch.Properties.HasFlag(CharacteristicProperties.Indicate)));
+                // 等待一段时间，确保设备特征已初始化
+                if (attempt > 1)
+                {
+                    _logger.LogInformation($"BLE: 通知订阅重试 {attempt}/{maxRetries}...");
+                    await Task.Delay(retryDelayMs);
+                }
 
-            if (notifyChar != null)
-            {
-                _logger.LogInformation($"BLE: ✅ 找到可通知特征: {notifyChar.Uuid} @ 服务 {notifyChar.Service.Uuid}");
+                var allCharacteristics = await _connectedPeripheral
+                    .GetAllCharacteristics()
+                    .FirstAsync();
 
-                _notifySubscription = _connectedPeripheral
-                    .NotifyCharacteristic(
-                        notifyChar.Service.Uuid,
-                        notifyChar.Uuid,
-                        useIndicationsIfAvailable: true
-                    )
-                    .Subscribe(notificationResult =>
-                    {
-                        if (notificationResult.Data != null)
+                _logger.LogInformation($"BLE: 搜索可通知特征，共 {allCharacteristics.Count} 个特征 (尝试 {attempt}/{maxRetries})");
+
+                static bool IsExcludedService(string uuid)
+                {
+                    var u = uuid.ToLowerInvariant();
+                    return u == "00001800-0000-1000-8000-00805f9b34fb"
+                        || u == "00001801-0000-1000-8000-00805f9b34fb";
+                }
+
+                var notifyChar = allCharacteristics.FirstOrDefault(ch =>
+                    !IsExcludedService(ch.Service.Uuid) &&
+                    (ch.Properties.HasFlag(CharacteristicProperties.Notify) ||
+                     ch.Properties.HasFlag(CharacteristicProperties.Indicate)));
+
+                if (notifyChar != null)
+                {
+                    _logger.LogInformation($"BLE: ✅ 找到可通知特征: {notifyChar.Uuid} @ 服务 {notifyChar.Service.Uuid}");
+
+                    _notifySubscription = _connectedPeripheral
+                        .NotifyCharacteristic(
+                            notifyChar.Service.Uuid,
+                            notifyChar.Uuid,
+                            useIndicationsIfAvailable: true
+                        )
+                        .Subscribe(notificationResult =>
                         {
-                            var data = notificationResult.Data.ToArray();
-                            ProcessNotification(data);
-                        }
-                    });
+                            if (notificationResult.Data != null)
+                            {
+                                var data = notificationResult.Data.ToArray();
+                                ProcessNotification(data);
+                            }
+                        },
+                        error =>
+                        {
+                            _logger.LogWarning($"BLE: 通知流错误 - {error.Message}");
+                        });
 
-                _logger.LogInformation("BLE: 已订阅通知，按键事件可用");
+                    _logger.LogInformation("BLE: ✅ 已订阅通知，按键事件可用");
+                    return; // 成功，直接返回
+                }
+                else
+                {
+                    _logger.LogWarning($"BLE: 未发现可通知特征 (尝试 {attempt}/{maxRetries})");
+                    if (attempt < maxRetries)
+                    {
+                        continue; // 继续重试
+                    }
+                    else
+                    {
+                        _logger.LogError("BLE: 所有重试均失败，按键事件将不可用");
+                        return;
+                    }
+                }
             }
-            else
+            catch (Exception ex)
             {
-                _logger.LogWarning("BLE: 未发现可通知特征，按键事件将不可用");
+                _logger.LogWarning($"BLE: 订阅通知失败 (尝试 {attempt}/{maxRetries}) - {ex.Message}");
+                if (attempt == maxRetries)
+                {
+                    _logger.LogError($"BLE: ❌ 通知订阅完全失败，已重试 {maxRetries} 次，按键事件将不可用");
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning($"BLE: 订阅通知失败 - {ex.Message}");
         }
     }
 
@@ -831,6 +882,8 @@ public class ShinyBleService : IBleService
 
         _notifySubscription?.Dispose();
         _notifySubscription = null;
+        _statusSubscription?.Dispose();
+        _statusSubscription = null;
         _writeServiceUuid = null;
         _writeCharacteristicUuid = null;
         _negotiatedMtu = 23; // BLE 默认值，系统会自行协商
@@ -864,94 +917,117 @@ public class ShinyBleService : IBleService
             return;
         }
         
-        try
+        // 重试机制：最多尝试 3 次
+        const int maxRetries = 3;
+        const int retryDelayMs = 500;
+        
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            _logger.LogInformation("BLE: 开始搜索可写特征值...");
-
-            var allCharacteristics = await _connectedPeripheral
-                .GetAllCharacteristics()
-                .FirstAsync();
-
-            _logger.LogInformation($"BLE: 发现 {allCharacteristics.Count} 个特征值");
-
-            static bool IsStandardBase(string uuid)
-                => uuid.EndsWith("-0000-1000-8000-00805f9b34fb", StringComparison.OrdinalIgnoreCase);
-
-            static bool IsExcludedService(string uuid)
+            try
             {
-                var u = uuid.ToLowerInvariant();
-                return u == "00001800-0000-1000-8000-00805f9b34fb"
-                    || u == "00001801-0000-1000-8000-00805f9b34fb";
-            }
+                _logger.LogInformation($"BLE: 开始搜索可写特征值 (尝试 {attempt}/{maxRetries})...");
 
-            var knownServicePref = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
-                "0000ffe0-0000-1000-8000-00805f9b34fb",
-                "0000abf0-0000-1000-8000-00805f9b34fb",
-                "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-            };
-
-            var knownCharPref = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
-                "0000ffe1-0000-1000-8000-00805f9b34fb",
-                "beb5483e-36e1-4688-b7f5-ea07361b26a8"
-            };
-
-            var candidates = new List<(BleCharacteristicInfo ch, int score)>();
-            foreach (var ch in allCharacteristics)
-            {
-                var props = ch.Properties;
-                var canWrite = props.HasFlag(CharacteristicProperties.Write) || props.HasFlag(CharacteristicProperties.WriteWithoutResponse);
-                _logger.LogDebug($"BLE: 特征 {ch.Uuid} @ 服务 {ch.Service.Uuid} Props={props}");
-                if (!canWrite)
-                    continue;
-
-                if (IsExcludedService(ch.Service.Uuid))
+                // 等待一段时间，确保设备特征已初始化
+                if (attempt > 1)
                 {
-                    _logger.LogDebug($"BLE: 排除系统服务可写特征 {ch.Uuid} @ {ch.Service.Uuid}");
-                    continue;
+                    _logger.LogInformation($"BLE: 可写特征重试 {attempt}/{maxRetries}...");
+                    await Task.Delay(retryDelayMs);
                 }
 
-                var score = 0;
-                if (props.HasFlag(CharacteristicProperties.WriteWithoutResponse)) score += 120;
-                if (props.HasFlag(CharacteristicProperties.Write)) score += 80;
+                var allCharacteristics = await _connectedPeripheral
+                    .GetAllCharacteristics()
+                    .FirstAsync();
 
-                if (!IsStandardBase(ch.Service.Uuid)) score += 60;
-                if (!IsStandardBase(ch.Uuid)) score += 20;
+                _logger.LogInformation($"BLE: 发现 {allCharacteristics.Count} 个特征值");
 
-                if (knownServicePref.Contains(ch.Service.Uuid)) score += 100;
-                if (knownCharPref.Contains(ch.Uuid)) score += 100;
+                static bool IsStandardBase(string uuid)
+                    => uuid.EndsWith("-0000-1000-8000-00805f9b34fb", StringComparison.OrdinalIgnoreCase);
 
-                var chLower = ch.Uuid.ToLowerInvariant();
-                if (chLower.StartsWith("00002b") && IsStandardBase(ch.Uuid)) score -= 200;
+                static bool IsExcludedService(string uuid)
+                {
+                    var u = uuid.ToLowerInvariant();
+                    return u == "00001800-0000-1000-8000-00805f9b34fb"
+                        || u == "00001801-0000-1000-8000-00805f9b34fb";
+                }
 
-                candidates.Add((ch, score));
+                var knownServicePref = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "6e400001-b5a3-f393-e0a9-e50e24dcca9e",
+                    "0000ffe0-0000-1000-8000-00805f9b34fb",
+                    "0000abf0-0000-1000-8000-00805f9b34fb",
+                    "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+                };
+
+                var knownCharPref = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+                    "0000ffe1-0000-1000-8000-00805f9b34fb",
+                    "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+                };
+
+                var candidates = new List<(BleCharacteristicInfo ch, int score)>();
+                foreach (var ch in allCharacteristics)
+                {
+                    var props = ch.Properties;
+                    var canWrite = props.HasFlag(CharacteristicProperties.Write) || props.HasFlag(CharacteristicProperties.WriteWithoutResponse);
+                    _logger.LogDebug($"BLE: 特征 {ch.Uuid} @ 服务 {ch.Service.Uuid} Props={props}");
+                    if (!canWrite)
+                        continue;
+
+                    if (IsExcludedService(ch.Service.Uuid))
+                    {
+                        _logger.LogDebug($"BLE: 排除系统服务可写特征 {ch.Uuid} @ {ch.Service.Uuid}");
+                        continue;
+                    }
+
+                    var score = 0;
+                    if (props.HasFlag(CharacteristicProperties.WriteWithoutResponse)) score += 120;
+                    if (props.HasFlag(CharacteristicProperties.Write)) score += 80;
+
+                    if (!IsStandardBase(ch.Service.Uuid)) score += 60;
+                    if (!IsStandardBase(ch.Uuid)) score += 20;
+
+                    if (knownServicePref.Contains(ch.Service.Uuid)) score += 100;
+                    if (knownCharPref.Contains(ch.Uuid)) score += 100;
+
+                    var chLower = ch.Uuid.ToLowerInvariant();
+                    if (chLower.StartsWith("00002b") && IsStandardBase(ch.Uuid)) score -= 200;
+
+                    candidates.Add((ch, score));
+                }
+
+                if (candidates.Count == 0)
+                {
+                    _logger.LogWarning($"BLE: 未找到任何可写特征值 (尝试 {attempt}/{maxRetries})");
+                    if (attempt < maxRetries)
+                    {
+                        continue; // 继续重试
+                    }
+                    return;
+                }
+
+                foreach (var c in candidates.OrderByDescending(x => x.score))
+                {
+                    _logger.LogInformation($"BLE: 候选写特征 score={c.score} svc={c.ch.Service.Uuid} ch={c.ch.Uuid} props={c.ch.Properties}");
+                }
+
+                var best = candidates.OrderByDescending(x => x.score).First().ch;
+                _writeServiceUuid = best.Service.Uuid;
+                _writeCharacteristicUuid = best.Uuid;
+                _logger.LogInformation("BLE: ✅ 选定写特征值");
+                _logger.LogInformation($"BLE:    服务: {_writeServiceUuid}");
+                _logger.LogInformation($"BLE:    特征值: {_writeCharacteristicUuid}");
+                _logger.LogInformation($"BLE:    属性: {best.Properties}");
+                return; // 成功，直接返回
             }
-
-            if (candidates.Count == 0)
+            catch (Exception ex)
             {
-                _logger.LogWarning("BLE: 未找到任何可写特征值!");
-                return;
+                _logger.LogWarning($"BLE: 缓存特征值失败 (尝试 {attempt}/{maxRetries}) - {ex.Message}");
+                if (attempt == maxRetries)
+                {
+                    _logger.LogError($"BLE: ❌ 缓存特征值完全失败，已重试 {maxRetries} 次");
+                }
             }
-
-            foreach (var c in candidates.OrderByDescending(x => x.score))
-            {
-                _logger.LogInformation($"BLE: 候选写特征 score={c.score} svc={c.ch.Service.Uuid} ch={c.ch.Uuid} props={c.ch.Properties}");
-            }
-
-            var best = candidates.OrderByDescending(x => x.score).First().ch;
-            _writeServiceUuid = best.Service.Uuid;
-            _writeCharacteristicUuid = best.Uuid;
-            _logger.LogInformation("BLE: ✅ 选定写特征值");
-            _logger.LogInformation($"BLE:    服务: {_writeServiceUuid}");
-            _logger.LogInformation($"BLE:    特征值: {_writeCharacteristicUuid}");
-            _logger.LogInformation($"BLE:    属性: {best.Properties}");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError($"BLE: 缓存特征值失败 - {ex.Message}");
         }
     }
 
@@ -1067,10 +1143,10 @@ public class ShinyBleService : IBleService
         }
 
         const int HEADER_SIZE = 32;
-        const int MTU = 512;
-        const int FIRST_CHUNK_DATA_SIZE = MTU - HEADER_SIZE; // 480 字节
+        var mtu = Math.Max(_negotiatedMtu, HEADER_SIZE + 20); // 至少留 20B 数据空间
+        var firstChunkDataSize = Math.Max(1, mtu - HEADER_SIZE);
 
-        _logger.LogInformation($"BLE: X4IM v2 帧传输开始 (header[5]=0x{header[5]:X2}, payload={payload.Length}B, appendEof={appendEof})");
+        _logger.LogInformation($"BLE: X4IM v2 帧传输开始 (header[5]=0x{header[5]:X2}, payload={payload.Length}B, mtu={mtu}, appendEof={appendEof})");
 
         // ========== 策略与 main.js 对齐 ==========
         // 第一个包：帧头(32) + 部分数据(480) = 512 字节
@@ -1080,7 +1156,7 @@ public class ShinyBleService : IBleService
         try
         {
             // 第一个包：帧头 + 部分数据
-            int firstDataSize = Math.Min(FIRST_CHUNK_DATA_SIZE, payload.Length);
+            int firstDataSize = Math.Min(firstChunkDataSize, payload.Length);
             var firstPacket = new byte[HEADER_SIZE + firstDataSize];
             Array.Copy(header, 0, firstPacket, 0, HEADER_SIZE);
             Array.Copy(payload, 0, firstPacket, HEADER_SIZE, firstDataSize);
@@ -1100,7 +1176,7 @@ public class ShinyBleService : IBleService
             while (offset < payload.Length)
             {
                 int remainingSize = payload.Length - offset;
-                int chunkSize = Math.Min(MTU, remainingSize);
+                int chunkSize = Math.Min(mtu, remainingSize);
                 var chunk = new byte[chunkSize];
                 Array.Copy(payload, offset, chunk, 0, chunkSize);
 
