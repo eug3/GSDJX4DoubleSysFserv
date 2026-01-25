@@ -614,7 +614,21 @@ public class ShinyBleService : IBleService
                         },
                         error =>
                         {
-                            _logger.LogWarning($"BLE: 通知流错误 - {error.Message}");
+                            _logger.LogWarning($"BLE: 通知流错误 - {error.Message}，1秒后自动重新订阅");
+                            // 自动重新订阅
+                            _ = Task.Run(async () =>
+                            {
+                                await Task.Delay(1000);
+                                if (IsConnected && _connectedPeripheral != null)
+                                {
+                                    _logger.LogInformation("BLE: 开始重新订阅通知...");
+                                    await SubscribeToNotificationsAsync();
+                                }
+                                else
+                                {
+                                    _logger.LogWarning("BLE: 无法重新订阅，连接已断开");
+                                }
+                            });
                         });
 
                     _logger.LogInformation("BLE: ✅ 已订阅通知，按键事件可用");
@@ -664,6 +678,20 @@ public class ShinyBleService : IBleService
             _lastProcessedKey = key;
             _lastProcessedTime = now;
             _logger.LogInformation($"✅ 处理按键事件: {key}");
+        }
+
+        // 确保通知订阅有效（防止在数据传输后订阅失效）
+        if (_notifySubscription == null && IsConnected && _connectedPeripheral != null)
+        {
+            _logger.LogWarning("BLE: 检测到通知订阅已失效，立即重新订阅...");
+            try
+            {
+                await SubscribeToNotificationsAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"BLE: 重新订阅失败 - {ex.Message}");
+            }
         }
 
         try
