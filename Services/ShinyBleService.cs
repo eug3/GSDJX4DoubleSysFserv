@@ -90,11 +90,23 @@ public class ShinyBleService : IBleService
             IsConnected = true;
             ConnectedDeviceName = e.Peripheral.Name ?? "未知设备";
             
+#if IOS
+            // 重新启动后台任务，防止系统已关闭
+            StartIosBackgroundTask();
+#elif ANDROID
+            // 重新启动前台服务，防止系统已关闭
+            StartBleForegroundService();
+#endif
+            
             await CacheWriteCharacteristicAsync();
             await SubscribeToNotificationsAsync();
+            
+            // 协商 MTU
+            NegotiateMtuAsync();
+            
             NotifyConnectionStateChanged(true, ConnectedDeviceName, ConnectionChangeReason.AutoReconnect);
             
-            _logger.LogInformation($"BLE Service: 后台重连成功 - {ConnectedDeviceName}");
+            _logger.LogInformation($"BLE Service: 后台重连初始化完成 - {ConnectedDeviceName}");
         }
     }
 
@@ -503,9 +515,21 @@ public class ShinyBleService : IBleService
                     // 自动重连成功，重新初始化
                     _logger.LogInformation("BLE: 自动重连成功，重新初始化...");
                     IsConnected = true;
+                    
+#if IOS
+                    // 重新启动后台任务，防止系统已关闭
+                    StartIosBackgroundTask();
+#elif ANDROID
+                    // 重新启动前台服务，防止系统已关闭
+                    StartBleForegroundService();
+#endif
+                    
                     await CacheWriteCharacteristicAsync();
                     await SubscribeToNotificationsAsync();
+                    
+                    // 协商 MTU
                     NegotiateMtuAsync();
+                    
                     NotifyConnectionStateChanged(true, ConnectedDeviceName, ConnectionChangeReason.AutoReconnect);
                     _logger.LogInformation($"BLE: 自动重连初始化完成 - {ConnectedDeviceName}");
                 }

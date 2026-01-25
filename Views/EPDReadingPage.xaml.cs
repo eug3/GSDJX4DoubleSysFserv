@@ -56,15 +56,45 @@ public partial class EPDReadingPage : ContentPage
         UpdateConnectionStatus();
         UpdatePageInfo();
 
-        // 优先检查 URL 缓存
-        if (!string.IsNullOrEmpty(_bookUrl))
+        // 只使用后端服务中保存的 URL
+        var urlFromBackend = _weReadService.State.CurrentUrl;
+        
+        if (string.IsNullOrEmpty(urlFromBackend))
         {
-            var cachedContent = await _weReadService.GetCachedContentAsync(_bookUrl);
-            if (!string.IsNullOrEmpty(cachedContent))
+            SetStatus("⚠️ 后端未保存 URL，请先从微信读书页面发送内容", true);
+            System.Diagnostics.Debug.WriteLine("EPDReading: 页面加载时后端无 URL");
+            return;
+        }
+
+        // 尝试从本地缓存获取对应 URL 的内容
+        var cachedContent = await _weReadService.GetCachedContentAsync(urlFromBackend);
+        if (!string.IsNullOrEmpty(cachedContent))
+        {
+            // 缓存命中，使用缓存内容
+            ContentEditor.Text = cachedContent;
+            SetStatus($"✅ 已加载缓存内容 ({cachedContent.Length} 字符)");
+            UpdatePageInfo();
+
+            // 自动发送到设备
+            _ = Task.Run(async () =>
             {
-                // 使用缓存内容
-                ContentEditor.Text = cachedContent;
-                SetStatus($"✅ 已加载缓存内容 ({cachedContent.Length} 字符)");
+                await Task.Delay(500);
+                await AutoSendCurrentContentAsync();
+            });
+            return;
+        }
+
+        // 缓存不存在，从后端服务请求
+        System.Diagnostics.Debug.WriteLine($"EPDReading: 页面加载时缓存不存在，从后端请求 URL: {urlFromBackend}");
+        SetStatus("缓存不存在，正在从后端服务加载...");
+
+        try
+        {
+            var content = await _weReadService.GetCurrentPageAsync(urlFromBackend, _cookie);
+            if (!string.IsNullOrEmpty(content))
+            {
+                ContentEditor.Text = content;
+                SetStatus($"✅ 已从后端加载内容 ({content.Length} 字符)");
                 UpdatePageInfo();
 
                 // 自动发送到设备
@@ -73,33 +103,16 @@ public partial class EPDReadingPage : ContentPage
                     await Task.Delay(500);
                     await AutoSendCurrentContentAsync();
                 });
-                return;
+            }
+            else
+            {
+                SetStatus("⚠️ 后端服务返回空内容", true);
             }
         }
-
-        // 如果有已保存的内容，显示它
-        if (!string.IsNullOrEmpty(_weReadService.State.LastText))
+        catch (Exception ex)
         {
-            ContentEditor.Text = _weReadService.State.LastText;
-
-            // 页面启动时自动发送到设备
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(500); // 延迟以确保连接状态稳定
-                await AutoSendCurrentContentAsync();
-            });
-        }
-        // 如果没有已保存的内容，但提供了 URL，自动获取当前页
-        else if (!string.IsNullOrEmpty(_bookUrl))
-        {
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(300); // 短暂延迟确保 UI 准备好
-                MainThread.BeginInvokeOnMainThread(() =>
-                {
-                    OnGetCurrentPage(this, EventArgs.Empty);
-                });
-            });
+            SetStatus($"加载失败: {ex.Message}", true);
+            System.Diagnostics.Debug.WriteLine($"EPDReading: 页面加载时请求错误 - {ex.Message}");
         }
     }
 
@@ -155,29 +168,58 @@ public partial class EPDReadingPage : ContentPage
 
     private async void OnGetCurrentPage(object? sender, EventArgs e)
     {
-        if (string.IsNullOrEmpty(_bookUrl))
+        // 获取后端服务中保存的 URL 作为 key
+        var urlKey = _weReadService.State.CurrentUrl;
+        if (string.IsNullOrEmpty(urlKey))
         {
-            await DisplayAlertAsync("错误", "未获取到书籍 URL，请从微信读书页面进入", "确定");
+            await DisplayAlertAsync("错误", "未保存的内容 URL，请先从微信读书页面获取过一次内容", "确定");
             return;
         }
 
         SetLoading(true);
-        SetStatus("正在获取当前页内容...");
+        SetStatus("正在加载内容...");
 
         try
         {
-            var content = await _weReadService.GetCurrentPageAsync(_bookUrl, _cookie);
+            // 先从缓存中获取对应 URL 的文本
+            var cachedContent = await _weReadService.GetCachedContentAsync(urlKey);
+            
+            if (!string.IsNullOrEmpty(cachedContent))
+            {
+                // 缓存命中，直接使用缓存内容
+                ContentEditor.Text = cachedContent;
+                UpdatePageInfo();
+                SetStatus($"✅ 已加载缓存文本，共 {cachedContent.Length} 字符");
+                
+                // 自动发送到设备
+                await AutoSendToDeviceAsync(cachedContent);
+                return;
+            }
+
+            // 缓存不存在，从后端服务请求
+            System.Diagnostics.Debug.WriteLine($"EPDReading: 缓存不存在，从后端请求 URL: {urlKey}");
+            SetStatus("缓存不存在，正在从后端服务请求...");
+
+            var content = await _weReadService.GetCurrentPageAsync(urlKey, _cookie);
+            
+            if (string.IsNullOrEmpty(content))
+            {
+                SetStatus("后端服务返回空内容", true);
+                return;
+            }
+
+            // 更新 UI 中的文本框
             ContentEditor.Text = content;
             UpdatePageInfo();
-            SetStatus($"获取成功，共 {content.Length} 字符");
+            SetStatus($"✅ 已从后端服务加载内容，共 {content.Length} 字符");
             
             // 自动发送到设备
             await AutoSendToDeviceAsync(content);
         }
         catch (Exception ex)
         {
-            SetStatus($"获取失败: {ex.Message}", true);
-            await DisplayAlertAsync("错误", $"获取内容失败: {ex.Message}", "确定");
+            SetStatus($"加载失败: {ex.Message}", true);
+            System.Diagnostics.Debug.WriteLine($"EPDReading: 加载错误 - {ex.Message}");
         }
         finally
         {
