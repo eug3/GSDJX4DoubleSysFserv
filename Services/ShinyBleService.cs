@@ -8,17 +8,18 @@ using System.IO;
 #if IOS
 using UIKit;
 #endif
+#if ANDROID
+using Android.App;
+using Android.Content;
+using Android.OS;
+using GSDJX4DoubleSysFserv.Platforms.Android;
+#endif
 
 namespace GSDJX4DoubleSysFserv.Services;
 
 /// <summary>
 /// 基于 Shiny.NET 3.x 的蓝牙服务 - 统一跨平台 BLE 通信
-/// 
-/// 关键特性：
-/// 1. 统一 iOS/Android 平台逻辑
-/// 2. 使用系统自动协商的 MTU
-/// 3. 保持与 main.js 相同的 512 字节 payload 策略
-/// </summary>
+ /// </summary>
 public class ShinyBleService : IBleService
 {
     private readonly IBleManager _bleManager;
@@ -32,6 +33,9 @@ public class ShinyBleService : IBleService
     private string? _writeCharacteristicUuid;
     private int _negotiatedMtu = 23; // BLE 默认值是 23 字节（20 + 3 ATT header）
     private ObservableCollection<BleDeviceInfo>? _scannedDevices;
+#if IOS
+    private nint _bgTaskId = 0; // iOS 后台任务 ID，对应 Android 前台服务
+#endif
     private readonly Dictionary<string, IPeripheral> _discoveredPeripherals = new();
     private TaskCompletionSource<ObservableCollection<BleDeviceInfo>>? _scanTcs;
     private IDisposable? _scanSubscription;
@@ -108,7 +112,7 @@ public class ShinyBleService : IBleService
             
             NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.DeviceDisconnected);
             
-            _logger.LogWarning($"BLE Service: 后台设备断开 - {previousDeviceName}");
+            _logger.LogWarning($"BLE Service: 后台设备断开 - {previousDeviceName}，保持服务运行等待重连");
         }
     }
 
@@ -274,6 +278,14 @@ public class ShinyBleService : IBleService
         
         await _storageService.RemoveAsync(SavedMacKey);
         
+#if IOS
+        // 停止后台任务
+        StopIosBackgroundTask();
+#elif ANDROID
+        // 停止前台服务
+        StopBleForegroundService();
+#endif
+        
         _notifySubscription?.Dispose();
         _notifySubscription = null;
         _writeServiceUuid = null;
@@ -288,7 +300,7 @@ public class ShinyBleService : IBleService
         
         IsConnected = false;
         ConnectedDeviceName = null;
-        _logger.LogInformation("BLE: 已删除保存的设备并断开连接");
+        _logger.LogInformation("BLE: 已删除保存的设备、断开连接并停止服务");
         
         if (wasConnected)
         {
@@ -424,6 +436,14 @@ public class ShinyBleService : IBleService
 
             NotifyConnectionStateChanged(true, ConnectedDeviceName, ConnectionChangeReason.UserInitiated);
 
+#if IOS
+            // 启动后台任务，对应 Android 前台服务
+            StartIosBackgroundTask();
+#elif ANDROID
+            // 启动前台服务，对应 iOS 的 BeginBackgroundTask
+            StartBleForegroundService();
+#endif
+
             await CacheWriteCharacteristicAsync();
             await SubscribeToNotificationsAsync();
             SetupDisconnectionHandler();
@@ -456,7 +476,7 @@ public class ShinyBleService : IBleService
             .Subscribe(_ =>
             {
                 var previousDeviceName = ConnectedDeviceName;
-                _logger.LogWarning($"BLE: 设备 {previousDeviceName} 已断开");
+                _logger.LogWarning($"BLE: 设备 {previousDeviceName} 已断开，保持服务运行等待重连");
                 IsConnected = false;
                 _writeServiceUuid = null;
                 _writeCharacteristicUuid = null;
@@ -512,7 +532,7 @@ public class ShinyBleService : IBleService
                     .NotifyCharacteristic(
                         notifyChar.Service.Uuid,
                         notifyChar.Uuid,
-                        useIndicationsIfAvailable: false
+                        useIndicationsIfAvailable: true
                     )
                     .Subscribe(notificationResult =>
                     {
@@ -559,12 +579,6 @@ public class ShinyBleService : IBleService
 
         try
         {
-#if IOS
-            nint bgTaskId = 0;
-            try
-            {
-                bgTaskId = UIApplication.SharedApplication.BeginBackgroundTask("BLEPageTurn", () => { });
-#endif
             if ((key != "RIGHT" && key != "LEFT" && key != "OK" && key != "ENTER") ||
                 !IsConnected ||
                 string.IsNullOrEmpty(_weReadService.State.CurrentUrl))
@@ -625,14 +639,6 @@ public class ShinyBleService : IBleService
                     _logger.LogWarning($"⚠️ 发送失败");
                 }
             }
-#if IOS
-            }
-            finally
-            {
-                if (bgTaskId != 0)
-                    UIApplication.SharedApplication.EndBackgroundTask(bgTaskId);
-            }
-#endif
         }
         catch (Exception ex)
         {
@@ -761,7 +767,15 @@ public class ShinyBleService : IBleService
     public void Disconnect()
     {
         var previousDeviceName = ConnectedDeviceName;
-        
+
+#if IOS
+        // 停止后台任务，对应 Android 前台服务
+        StopIosBackgroundTask();
+#elif ANDROID
+        // 停止前台服务，对应 iOS 的 EndBackgroundTask
+        StopBleForegroundService();
+#endif
+
         _notifySubscription?.Dispose();
         _notifySubscription = null;
         _writeServiceUuid = null;
@@ -773,11 +787,11 @@ public class ShinyBleService : IBleService
             _connectedPeripheral.CancelConnection();
             _connectedPeripheral = null;
         }
-        
+
         IsConnected = false;
         ConnectedDeviceName = null;
         _logger.LogInformation("BLE: 已断开连接");
-        
+
         NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.UserDisconnected);
     }
 
@@ -980,6 +994,12 @@ public class ShinyBleService : IBleService
 
     public async Task<bool> SendImageToDeviceAsync(byte[] imageData, string fileName = "page_0.bmp", ushort flags = X4IMProtocol.FLAG_TYPE_BMP, bool sendShowPage = true, byte pageIndex = 0)
     {
+#if ANDROID
+        // Android 平台禁用图片发送逻辑
+        _logger.LogWarning("BLE: Android 平台已禁用发送图片逻辑");
+        await Task.CompletedTask;
+        return false;
+#else
         if (!IsConnected || _connectedPeripheral == null)
         {
             _logger.LogWarning("BLE: 设备未连接，无法发送图片");
@@ -1021,6 +1041,7 @@ public class ShinyBleService : IBleService
             _logger.LogError($"BLE: 发送图片失败 - {ex.Message}");
             return false;
         }
+#endif
     }
 
     private async Task<bool> SendFrameAsync(byte[] header, byte[] payload, bool appendEof)
@@ -1216,4 +1237,108 @@ public class ShinyBleService : IBleService
 
         return await _scanTcs.Task;
     }
+
+#if IOS
+    /// <summary>
+    /// 启动 iOS 后台任务（iOS 专用）
+    /// 对应 Android 前台服务
+    /// </summary>
+    private void StartIosBackgroundTask()
+    {
+        try
+        {
+            // 如果已有后台任务在运行，先结束它
+            if (_bgTaskId != 0)
+            {
+                UIApplication.SharedApplication.EndBackgroundTask(_bgTaskId);
+                _bgTaskId = 0;
+            }
+
+            // 启动新的后台任务
+            _bgTaskId = UIApplication.SharedApplication.BeginBackgroundTask("BLEConnection", () =>
+            {
+                // 系统即将结束后台任务时的回调
+                if (_bgTaskId != 0)
+                {
+                    UIApplication.SharedApplication.EndBackgroundTask(_bgTaskId);
+                    _bgTaskId = 0;
+                }
+            });
+
+            if (_bgTaskId != 0)
+            {
+                _logger.LogInformation("BLE: iOS 后台任务已启动");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning($"BLE: 启动后台任务失败 - {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 停止 iOS 后台任务（iOS 专用）
+    /// 对应 Android 前台服务
+    /// </summary>
+    private void StopIosBackgroundTask()
+    {
+        try
+        {
+            if (_bgTaskId != 0)
+            {
+                UIApplication.SharedApplication.EndBackgroundTask(_bgTaskId);
+                _bgTaskId = 0;
+                _logger.LogInformation("BLE: iOS 后台任务已停止");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning($"BLE: 停止后台任务失败 - {ex.Message}");
+        }
+    }
+#endif
+
+#if ANDROID
+    /// <summary>
+    /// 启动 BLE 前台服务（Android 专用）
+    /// 对应 iOS 的 BeginBackgroundTask
+    /// </summary>
+    private void StartBleForegroundService()
+    {
+        try
+        {
+            var context = Platform.AppContext;
+            if (context != null)
+            {
+                BleForegroundService.StartService(context);
+                _logger.LogInformation("BLE: Android 前台服务已启动");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning($"BLE: 启动前台服务失败 - {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 停止 BLE 前台服务（Android 专用）
+    /// 对应 iOS 的 EndBackgroundTask
+    /// </summary>
+    private void StopBleForegroundService()
+    {
+        try
+        {
+            var context = Platform.AppContext;
+            if (context != null)
+            {
+                BleForegroundService.StopService(context);
+                _logger.LogInformation("BLE: Android 前台服务已停止");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning($"BLE: 停止前台服务失败 - {ex.Message}");
+        }
+    }
+#endif
 }

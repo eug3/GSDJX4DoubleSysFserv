@@ -293,11 +293,20 @@ public class WeReadService : IWeReadService
                     throw new Exception("服务器返回空响应");
                 }
 
-                // 如果响应以 '<' 开头，说明是 HTML 而不是 JSON
-                if (responseContent.TrimStart().StartsWith('<'))
+                // 如果响应看起来是 HTML（例如 <!doctype html>），认为是会话初始化/错误页，需重试
+                var trimmed = responseContent.TrimStart();
+                if (trimmed.StartsWith("<!doctype", StringComparison.OrdinalIgnoreCase) ||
+                    trimmed.StartsWith("<html", StringComparison.OrdinalIgnoreCase) ||
+                    trimmed.StartsWith("<HTML", StringComparison.Ordinal))
                 {
-                    var preview = responseContent.Length > 500 ? responseContent.Substring(0, 500) + "..." : responseContent;
-                    throw new Exception($"服务器返回了 HTML 页面而不是 JSON（可能是错误页面）。响应内容: {preview}");
+                    var preview = responseContent.Length > 300 ? responseContent.Substring(0, 300) + "..." : responseContent;
+                    System.Diagnostics.Debug.WriteLine($"WeRead: 收到 HTML 响应，准备重试 (尝试 {attempt}/{maxRetries})。预览: {preview}");
+                    if (attempt < maxRetries)
+                    {
+                        await Task.Delay(1000 * attempt); // 指数退避
+                        continue; // 直接重试，不走异常路径
+                    }
+                    throw new Exception("服务器多次返回 HTML 页面，已达到最大重试次数");
                 }
 
                 WeReadResponse? result = null;

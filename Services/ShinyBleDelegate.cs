@@ -237,7 +237,7 @@ public class ShinyBleDelegate : BleDelegate
                     .NotifyCharacteristic(
                         notifyChar.Service.Uuid,
                         notifyChar.Uuid,
-                        useIndicationsIfAvailable: false
+                        useIndicationsIfAvailable: true
                     )
                     .Subscribe(notificationResult =>
                     {
