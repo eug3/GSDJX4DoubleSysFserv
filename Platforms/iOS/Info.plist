@@ -4,6 +4,8 @@
 <dict>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>CFBundleDisplayName</key>
+	<string>MFPx4</string>
 	<key>CFBundleExecutable</key>
 	<string>GSDJX4DoubleSysFserv</string>
 	<key>UIRequiredDeviceCapabilities</key>
