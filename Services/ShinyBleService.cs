@@ -751,6 +751,21 @@ public class ShinyBleService : IBleService
     {
         key = string.Empty;
 
+        // 处理位置报告 (0x96 + 8字节: charPosition(4B) + totalChars(4B))
+        if (data.Length == 9 && data[0] == X4IMProtocol.CMD_POSITION_REPORT)
+        {
+            var charPosition = BitConverter.ToUInt32(data, 1);
+            var totalChars = BitConverter.ToUInt32(data, 5);
+            var progress = totalChars > 0 ? (charPosition * 100.0 / totalChars) : 0;
+            
+            _logger.LogInformation($"📍 位置报告: {charPosition}/{totalChars} ({progress:F1}%)");
+            
+            // 异步同步滚动到 RemoteServe
+            _ = _weReadService.SyncScrollPositionAsync(charPosition, totalChars);
+            
+            return false; // 不触发按键事件
+        }
+
         if (!string.IsNullOrWhiteSpace(message))
         {
             var normalized = message.Trim().ToUpperInvariant();

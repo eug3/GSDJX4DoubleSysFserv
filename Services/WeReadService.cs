@@ -110,6 +110,11 @@ public interface IWeReadService
     /// 缓存文本内容，使用 URL 作为 key
     /// </summary>
     Task CacheContentAsync(string url, string content);
+
+    /// <summary>
+    /// 同步滚动位置到 RemoteServe
+    /// </summary>
+    Task SyncScrollPositionAsync(uint charPosition, uint totalChars);
 }
 
 /// <summary>
@@ -490,6 +495,59 @@ public class WeReadService : IWeReadService
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"WeRead: 缓存内容失败 - {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 同步滚动位置到 RemoteServe
+    /// 对应 BleClient main.js 中的 handlePositionReport 函数
+    /// </summary>
+    public async Task SyncScrollPositionAsync(uint charPosition, uint totalChars)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(State.CurrentUrl))
+            {
+                System.Diagnostics.Debug.WriteLine("WeRead: 无当前 URL，跳过滚动同步");
+                return;
+            }
+
+            var progress = totalChars > 0 ? (charPosition * 100.0 / totalChars) : 0;
+            System.Diagnostics.Debug.WriteLine($"🔄 同步滚动到 RemoteServe: {charPosition}/{totalChars} ({progress:F1}%)");
+
+            var readerUrl = $"{ServerUrl.TrimEnd('/')}/api/weread/reader";
+            var payload = new
+            {
+                id = "maui-client",
+                cookie = State.Cookie,
+                url = State.CurrentUrl,
+                action = "scroll",
+                charPosition,
+                metadata = new
+                {
+                    totalChars,
+                    progress = charPosition / (double)totalChars
+                }
+            };
+
+            var json = JsonSerializer.Serialize(payload, _jsonOptions);
+            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PostAsync(readerUrl, content);
+            var responseText = await response.Content.ReadAsStringAsync();
+
+            if (response.IsSuccessStatusCode)
+            {
+                System.Diagnostics.Debug.WriteLine("✅ 滚动同步成功");
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine($"❌ 滚动同步失败: HTTP {response.StatusCode}");
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"❌ 滚动同步异常: {ex.Message}");
         }
     }
 }
