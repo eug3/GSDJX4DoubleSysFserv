@@ -91,6 +91,7 @@ public class ShinyBleService : IBleService
             ConnectedDeviceName = e.Peripheral.Name ?? "未知设备";
             
             await CacheWriteCharacteristicAsync();
+            await SubscribeToNotificationsAsync();
             NotifyConnectionStateChanged(true, ConnectedDeviceName, ConnectionChangeReason.AutoReconnect);
             
             _logger.LogInformation($"BLE Service: 后台重连成功 - {ConnectedDeviceName}");
@@ -472,29 +473,42 @@ public class ShinyBleService : IBleService
 
         _connectedPeripheral
             .WhenStatusChanged()
-            .Where(x => x == ConnectionState.Disconnected)
-            .Subscribe(_ =>
+            .Subscribe(async state =>
             {
-                var previousDeviceName = ConnectedDeviceName;
-                _logger.LogWarning($"BLE: 设备 {previousDeviceName} 已断开，保持服务运行等待重连");
-                IsConnected = false;
-                _writeServiceUuid = null;
-                _writeCharacteristicUuid = null;
-                _negotiatedMtu = 23; // BLE 默认值，系统会自行协商
-                _notifySubscription?.Dispose();
-                _notifySubscription = null;
-                
-                NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.DeviceDisconnected);
-                
-                MainThread.BeginInvokeOnMainThread(async () =>
+                if (state == ConnectionState.Disconnected)
                 {
-                    await Task.Delay(2000);
-                    if (!IsConnected && _connectedPeripheral != null)
+                    var previousDeviceName = ConnectedDeviceName;
+                    _logger.LogWarning($"BLE: 设备 {previousDeviceName} 已断开，保持服务运行等待重连");
+                    IsConnected = false;
+                    _writeServiceUuid = null;
+                    _writeCharacteristicUuid = null;
+                    _negotiatedMtu = 23; // BLE 默认值，系统会自行协商
+                    _notifySubscription?.Dispose();
+                    _notifySubscription = null;
+                    
+                    NotifyConnectionStateChanged(false, previousDeviceName, ConnectionChangeReason.DeviceDisconnected);
+                    
+                    MainThread.BeginInvokeOnMainThread(async () =>
                     {
-                        _logger.LogInformation("BLE: 尝试自动重连...");
-                        _connectedPeripheral.Connect(new ConnectionConfig { AutoConnect = true });
-                    }
-                });
+                        await Task.Delay(2000);
+                        if (!IsConnected && _connectedPeripheral != null)
+                        {
+                            _logger.LogInformation("BLE: 尝试自动重连...");
+                            _connectedPeripheral.Connect(new ConnectionConfig { AutoConnect = true });
+                        }
+                    });
+                }
+                else if (state == ConnectionState.Connected && !IsConnected)
+                {
+                    // 自动重连成功，重新初始化
+                    _logger.LogInformation("BLE: 自动重连成功，重新初始化...");
+                    IsConnected = true;
+                    await CacheWriteCharacteristicAsync();
+                    await SubscribeToNotificationsAsync();
+                    NegotiateMtuAsync();
+                    NotifyConnectionStateChanged(true, ConnectedDeviceName, ConnectionChangeReason.AutoReconnect);
+                    _logger.LogInformation($"BLE: 自动重连初始化完成 - {ConnectedDeviceName}");
+                }
             });
     }
 

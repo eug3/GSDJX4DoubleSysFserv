@@ -56,11 +56,11 @@
                                HeightRequest="40" />
         </StackLayout>
         <!-- 顶部状态栏 -->
-        <Frame Grid.Row="1" 
-               BackgroundColor="#0f3460" 
-               CornerRadius="8" 
-               Padding="10"
-               Margin="0,0,0,10">
+        <Border Grid.Row="1" 
+                BackgroundColor="#0f3460" 
+                StrokeShape="RoundRectangle 8"
+                Padding="10"
+                Margin="0,0,0,10">
             <StackLayout Spacing="5">
                 <Label x:Name="ConnectionStatusLabel"
                        Text="蓝牙状态: 未连接"
@@ -76,13 +76,13 @@
                        TextColor="#00ff88"
                        FontSize="12" />
             </StackLayout>
-        </Frame>
+        </Border>
 
         <!-- 文本内容显示区域 -->
-        <Frame Grid.Row="2" 
-               BackgroundColor="#0f3460" 
-               CornerRadius="8"
-               Padding="0">
+        <Border Grid.Row="2" 
+                BackgroundColor="#0f3460" 
+                StrokeShape="RoundRectangle 8"
+                Padding="0">
             <Editor x:Name="ContentEditor"
                     BackgroundColor="#0f3460"
                     TextColor="#ffffff"
@@ -90,7 +90,7 @@
                     FontSize="14"
                     IsReadOnly="True"
                     Placeholder="文本内容将在这里显示..." />
-        </Frame>
+        </Border>
 
   
     </Grid>
