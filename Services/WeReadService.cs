@@ -52,6 +52,11 @@ public class WeReadState
 public interface IWeReadService
 {
     /// <summary>
+    /// Cookie 容器，用于管理 Cookies
+    /// </summary>
+    System.Net.CookieContainer Cookies { get; set; }
+
+    /// <summary>
     /// RemoteServe 服务器地址
     /// </summary>
     string ServerUrl { get; set; }
@@ -119,6 +124,11 @@ public class WeReadService : IWeReadService
     private const string StateKey = "WeRead_State";
     private const string CacheKeyPrefix = "WeReadCache_";
 
+    /// <summary>
+    /// Cookie 容器，用于管理 Cookies
+    /// </summary>
+    public System.Net.CookieContainer Cookies { get; set; } = new();
+
     public string ServerUrl { get; set; } = "https://3gx043ki8112.vicp.fun";
     public WeReadState State { get; private set; } = new();
 
@@ -172,6 +182,33 @@ public class WeReadService : IWeReadService
     {
         State.CurrentUrl = url;
         State.Cookie = cookie;
+
+        // 将 cookie 字符串解析并添加到 CookieContainer
+        if (!string.IsNullOrEmpty(cookie) && !string.IsNullOrEmpty(url))
+        {
+            try
+            {
+                var uri = new Uri(url);
+                var pairs = cookie.Split(';', StringSplitOptions.RemoveEmptyEntries);
+                foreach (var pair in pairs)
+                {
+                    var trimmed = pair.Trim();
+                    var equalIndex = trimmed.IndexOf('=');
+                    if (equalIndex > 0)
+                    {
+                        var name = trimmed[..equalIndex].Trim();
+                        var value = trimmed[(equalIndex + 1)..].Trim();
+                        var cookieObj = new System.Net.Cookie(name, value, "/", uri.Host);
+                        Cookies.Add(cookieObj);
+                    }
+                }
+                System.Diagnostics.Debug.WriteLine($"WeRead: 已将 {pairs.Length} 个 cookies 添加到 CookieContainer");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"WeRead: 解析 cookie 失败 - {ex.Message}");
+            }
+        }
     }
 
     public async Task<string> GetCurrentPageAsync(string url, string cookie)

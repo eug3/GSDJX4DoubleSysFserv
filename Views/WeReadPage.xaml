@@ -9,7 +9,11 @@
 
     <Grid>
         <!-- WebView 浏览器 -->
-        <WebView x:Name="WebView" Source="https://weread.qq.com/" Navigated="WebView_Navigated" />
+        <WebView x:Name="WebView" Source="https://weread.qq.com/" 
+        Navigated="WebView_Navigated" 
+        UserAgent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Edg/91.0.864.64"
+        
+        />
 
         <!-- 左侧浮动按钮 - 仅在阅读页且蓝牙已连接时显示 -->
         <Button
@@ -31,24 +35,6 @@
             </Button.Shadow>
         </Button>
 
-        <!-- 登录按钮 - 仅在微信读书首页显示 -->
-        <Button
-            x:Name="LoginButton"
-            Text="点击登录"
-            FontSize="16"
-            WidthRequest="100"
-            HeightRequest="40"
-            CornerRadius="20"
-            BackgroundColor="#07C160"
-            TextColor="White"
-            HorizontalOptions="Center"
-            VerticalOptions="End"
-            Margin="0,0,0,50"
-            IsVisible="False"
-            Clicked="LoginButton_Clicked">
-            <Button.Shadow>
-                <Shadow Brush="Black" Offset="3,3" Radius="3" />
-            </Button.Shadow>
-        </Button>
+      
     </Grid>
 </ContentPage>
