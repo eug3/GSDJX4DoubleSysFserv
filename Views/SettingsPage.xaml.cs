@@ -33,7 +33,7 @@ public partial class SettingsPage : ContentPage
     protected override void OnDisappearing()
     {
         base.OnDisappearing();
-        // 注意：这里不取消订阅，因为我们希望在页面不可见时也能接收状态变化
+        _bleService.ConnectionStateChanged -= OnConnectionStateChanged;
     }
     
     /// <summary>
@@ -41,20 +41,32 @@ public partial class SettingsPage : ContentPage
     /// </summary>
     private void OnConnectionStateChanged(object? sender, ConnectionStateChangedEventArgs e)
     {
-        // 已在主线程上，直接更新 UI
-        UpdateConnectionStatus();
-        
-        if (e.IsConnected)
+        MainThread.BeginInvokeOnMainThread(() =>
         {
-            DeviceListView.IsVisible = false;
-            LoadSavedDevice();
-            System.Diagnostics.Debug.WriteLine($"BLE: 连接状态变化 - 已连接到 {e.DeviceName}，原因: {e.Reason}");
-        }
-        else
-        {
-            LoadSavedDevice();
-            System.Diagnostics.Debug.WriteLine($"BLE: 连接状态变化 - 已断开 {e.DeviceName}，原因: {e.Reason}");
-        }
+            try
+            {
+                if (this.Handler == null)
+                    return;
+
+                UpdateConnectionStatus();
+
+                if (e.IsConnected)
+                {
+                    DeviceListView.IsVisible = false;
+                    LoadSavedDevice();
+                    System.Diagnostics.Debug.WriteLine($"BLE: 连接状态变化 - 已连接到 {e.DeviceName}，原因: {e.Reason}");
+                }
+                else
+                {
+                    LoadSavedDevice();
+                    System.Diagnostics.Debug.WriteLine($"BLE: 连接状态变化 - 已断开 {e.DeviceName}，原因: {e.Reason}");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"BLE: OnConnectionStateChanged 异常 - {ex.Message}");
+            }
+        });
     }
 
     private void UpdateConnectionStatus()
@@ -212,39 +224,44 @@ public partial class SettingsPage : ContentPage
 
     private async void ConnectButton_Clicked(object? sender, EventArgs e)
     {
-        if (sender is Button button && button.CommandParameter is BleDeviceInfo device)
-        {
-            var originalText = button.Text;
-            button.IsEnabled = false;
-            button.Text = "连接中...";
+        if (sender is not Button button)
+            return;
 
-            try
+        if (button.CommandParameter is not BleDeviceInfo device)
+        {
+            await DisplayAlertAsync("错误", "无效的设备信息", "确定");
+            return;
+        }
+
+        var originalText = button.Text;
+        button.IsEnabled = false;
+        button.Text = "连接中...";
+
+        try
+        {
+            System.Diagnostics.Debug.WriteLine($"UI: 开始连接 {device.Name}");
+            var connected = await _bleService.ConnectAsync(device.Id, device.MacAddress);
+
+            System.Diagnostics.Debug.WriteLine($"UI: 连接结果 = {connected}");
+
+            if (connected)
             {
-                System.Diagnostics.Debug.WriteLine($"UI: 开始连接 {device.Name}");
-                var connected = await _bleService.ConnectAsync(device.Id, device.MacAddress);
-                
-                System.Diagnostics.Debug.WriteLine($"UI: 连接结果 = {connected}");
-                
-                if (connected)
-                {
-                    // UI 更新由 ConnectionStateChanged 事件处理
-                    await DisplayAlertAsync("成功", $"已连接到 {device.Name}", "确定");
-                }
-                else
-                {
-                    await DisplayAlertAsync("失败", "连接失败，请检查：\n1. 设备是否开机\n2. 设备是否在范围内\n3. 蓝牙权限是否允许", "确定");
-                }
+                await DisplayAlertAsync("成功", $"已连接到 {device.Name}", "确定");
             }
-            catch (Exception ex)
+            else
             {
-                System.Diagnostics.Debug.WriteLine($"UI: 连接异常 - {ex}");
-                await DisplayAlertAsync("错误", $"连接错误: {ex.Message}", "确定");
+                await DisplayAlertAsync("失败", "连接失败，请检查：\n1. 设备是否开机\n2. 设备是否在范围内\n3. 蓝牙权限是否允许", "确定");
             }
-            finally
-            {
-                button.IsEnabled = true;
-                button.Text = originalText;
-            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"UI: 连接异常 - {ex}");
+            await DisplayAlertAsync("错误", $"连接错误: {ex.Message}", "确定");
+        }
+        finally
+        {
+            button.IsEnabled = true;
+            button.Text = originalText;
         }
     }
 
