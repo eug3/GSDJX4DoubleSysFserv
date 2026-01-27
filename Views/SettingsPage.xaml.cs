@@ -103,16 +103,17 @@ public partial class SettingsPage : ContentPage
     private async void ScanButton_Clicked(object? sender, EventArgs e)
     {
 #if ANDROID
-        // Android: 检查并请求蓝牙权限 (Android 12+)
+        // Android: 检查并请求蓝牙扫描权限 (Android 12+ 需要 BLUETOOTH_SCAN)
         if (Android.OS.Build.VERSION.SdkInt >= Android.OS.BuildVersionCodes.S)
         {
+            // .NET MAUI Essentials 将 Android 12+ 的 BLUETOOTH_SCAN/CONNECT 映射到 Permissions.Bluetooth
             var scanStatus = await Permissions.CheckStatusAsync<Permissions.Bluetooth>();
             if (scanStatus != PermissionStatus.Granted)
             {
                 scanStatus = await Permissions.RequestAsync<Permissions.Bluetooth>();
                 if (scanStatus != PermissionStatus.Granted)
                 {
-                    await DisplayAlertAsync("权限被拒绝", "应用需要蓝牙扫描权限才能查找设备。\n请在设置中开启蓝牙权限。", "确定");
+                    await DisplayAlertAsync("权限被拒绝", "应用需要蓝牙扫描/连接权限才能查找设备。\n请在设置中开启蓝牙权限。", "确定");
                     return;
                 }
             }
@@ -240,6 +241,64 @@ public partial class SettingsPage : ContentPage
         try
         {
             System.Diagnostics.Debug.WriteLine($"UI: 开始连接 {device.Name}");
+
+#if ANDROID
+            // Android 13+ 先确保通知已启用（前台服务需要）
+            if (Android.OS.Build.VERSION.SdkInt >= Android.OS.BuildVersionCodes.Tiramisu)
+            {
+                try
+                {
+                    var notificationManager = (Android.App.NotificationManager?)
+                        Android.App.Application.Context.GetSystemService(Android.Content.Context.NotificationService);
+                    
+                    if (notificationManager != null && !notificationManager.AreNotificationsEnabled())
+                    {
+                        var result = await DisplayAlertAsync(
+                            "通知权限提示",
+                            "前台蓝牙服务需要通知权限在后台保持连接。\n\n是否现在打开应用通知设置？",
+                            "设置",
+                            "继续"
+                        );
+
+                        if (result)
+                        {
+                            try
+                            {
+                                var intent = new Android.Content.Intent();
+                                intent.SetAction(Android.Provider.Settings.ActionAppNotificationSettings);
+                                intent.PutExtra(Android.Provider.Settings.ExtraAppPackage, 
+                                    Android.App.Application.Context.PackageName);
+                                Platform.CurrentActivity?.StartActivity(intent);
+                            }
+                            catch (Exception ex)
+                            {
+                                System.Diagnostics.Debug.WriteLine($"打开通知设置失败: {ex.Message}");
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // 忽略异常，继续连接
+                }
+            }
+
+            // Android 12+: 连接需要 BLUETOOTH_CONNECT（Essentials 映射为 Permissions.Bluetooth）
+            if (Android.OS.Build.VERSION.SdkInt >= Android.OS.BuildVersionCodes.S)
+            {
+                var connectStatus = await Permissions.CheckStatusAsync<Permissions.Bluetooth>();
+                if (connectStatus != PermissionStatus.Granted)
+                {
+                    connectStatus = await Permissions.RequestAsync<Permissions.Bluetooth>();
+                    if (connectStatus != PermissionStatus.Granted)
+                    {
+                        await DisplayAlertAsync("权限被拒绝", "应用需要蓝牙连接权限才能连接设备。\n请在设置中开启蓝牙权限。", "确定");
+                        return;
+                    }
+                }
+            }
+#endif
+
             var connected = await _bleService.ConnectAsync(device.Id, device.MacAddress);
 
             System.Diagnostics.Debug.WriteLine($"UI: 连接结果 = {connected}");

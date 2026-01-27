@@ -11,7 +11,7 @@ namespace GSDJX4DoubleSysFserv.Platforms.Android;
 /// 用于在后台保持 BLE 连接和按键翻页功能
 /// 对应 iOS 的 BeginBackgroundTask/EndBackgroundTask 机制
 /// </summary>
-[Service(Exported = false)]
+[Service(Exported = false, ForegroundServiceType = ForegroundService.TypeConnectedDevice)]
 public class BleForegroundService : Service
 {
     private const string ServiceChannelId = "BleForegroundServiceChannel";
@@ -79,18 +79,59 @@ public class BleForegroundService : Service
     }
 
     /// <summary>
+    /// 检查 Android 13+ 通知是否启用（前台服务依赖通知）
+    /// </summary>
+    private static bool IsNotificationEnabledForService(Context context)
+    {
+        if (Build.VERSION.SdkInt < BuildVersionCodes.Tiramisu)
+            return true; // Android 12 及以下无此限制
+        
+        try
+        {
+            var notificationManager = (NotificationManager?)context.GetSystemService(Context.NotificationService);
+            if (notificationManager == null) return false;
+
+            // 检查系统是否允许通知、渠道是否启用
+            return notificationManager.AreNotificationsEnabled();
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 启动 BLE 前台服务
+    /// Android 13+ 需要通知权限才能正常启动
     /// </summary>
     public static void StartService(Context context)
     {
-        var intent = new Intent(context, typeof(BleForegroundService));
-        if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
+        // Android 13+ 通知检查：前台服务需要通知权限
+        if (Build.VERSION.SdkInt >= BuildVersionCodes.Tiramisu && !IsNotificationEnabledForService(context))
         {
-            context.StartForegroundService(intent);
+            System.Diagnostics.Debug.WriteLine(
+                "BleForegroundService: Android 13+ 通知被禁用，前台服务启动可能失败。请在设置中开启应用通知权限。");
+            // 在严格 ROM 上（如 vivo），通知禁用会导致 ForegroundServiceStartNotAllowedException
+            // 此处返回以避免崩溃，等待用户开启通知后重试连接
+            return;
         }
-        else
+
+        try
         {
-            context.StartService(intent);
+            var intent = new Intent(context, typeof(BleForegroundService));
+            if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
+            {
+                context.StartForegroundService(intent);
+            }
+            else
+            {
+                context.StartService(intent);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"BleForegroundService: 启动前台服务异常：{ex.Message}。检查项：1) 蓝牙权限(Android 12+) 2) 通知权限(Android 13+)");
         }
     }
 

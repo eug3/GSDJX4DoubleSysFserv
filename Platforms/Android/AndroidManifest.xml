@@ -8,8 +8,7 @@
 			</intent-filter>
 		</receiver>
 
-		<!-- BLE 前台服务 -->
-		<service android:name=".Platforms.Android.BleForegroundService" android:foregroundServiceType="connectedDevice" android:exported="false" />
+		<!-- BLE 前台服务由 [Service] 特性自动生成清单条目，避免手工声明造成类名不匹配 -->
 	</application>
 	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 	<uses-permission android:name="android.permission.INTERNET" />
@@ -22,8 +21,8 @@
 	<uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 	
 	<!-- BLE 扫描需要位置权限 (Android 11 及以下) -->
-	<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-	<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+	<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+	<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30" />
 	
 	<!-- 后台蓝牙服务 -->
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
