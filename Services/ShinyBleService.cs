@@ -5,7 +5,6 @@ using System.Reactive.Linq;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using System.IO;
-using System.Threading;
 #if IOS
 using UIKit;
 #endif
@@ -28,7 +27,6 @@ public class ShinyBleService : IBleService
     private readonly ILogger<ShinyBleService> _logger;
     private readonly IWeReadService _weReadService;
     private const string SavedMacKey = "Ble_SavedMacAddress";
-    private readonly SemaphoreSlim _sendLock = new(1, 1);
 
     private IPeripheral? _connectedPeripheral;
     private string? _writeServiceUuid;
@@ -939,19 +937,6 @@ public class ShinyBleService : IBleService
         });
     }
 
-    private async Task<bool> EnsureWriteCharacteristicAsync()
-    {
-        if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
-        {
-            await CacheWriteCharacteristicAsync();
-        }
-
-        return IsConnected
-            && _connectedPeripheral != null
-            && _writeServiceUuid != null
-            && _writeCharacteristicUuid != null;
-    }
-
     private async Task CacheWriteCharacteristicAsync()
     {
         if (_connectedPeripheral == null)
@@ -1076,102 +1061,91 @@ public class ShinyBleService : IBleService
 
     public async Task<bool> SendTextToDeviceAsync(string text, int chapter = 0)
     {
-        await _sendLock.WaitAsync();
-        try
+        if (!IsConnected || _connectedPeripheral == null)
         {
-            if (!IsConnected || _connectedPeripheral == null)
-            {
-                _logger.LogWarning("BLE: 设备未连接");
-                return false;
-            }
-
-            if (string.IsNullOrEmpty(text))
-            {
-                _logger.LogWarning("BLE: 文本内容为空");
-                return false;
-            }
-
-            if (!await EnsureWriteCharacteristicAsync())
-            {
-                _logger.LogError("BLE: 无可用写入通道，放弃发送");
-                return false;
-            }
-
-            var retried = false;
-
-            while (true)
-            {
-                try
-                {
-                    var data = Encoding.UTF8.GetBytes(text);
-                    var bookId = $"weread_{chapter}";
-                    var header = X4IMProtocol.CreateHeader((uint)data.Length, bookId, 0, X4IMProtocol.FLAG_TYPE_TXT);
-                    _logger.LogInformation($"BLE: 发送 TXT bookId=\"{bookId}\", size={data.Length} 字节");
-
-                    // 按原应用行为：数据传完后再单独发送 EOF
-                    var sent = await SendFrameAsync(header, data, appendEof: false);
-                    if (!sent)
-                    {
-                        return false;
-                    }
-
-                    await Task.Delay(50);
-                    await SendEofAsync();
-                    _logger.LogInformation($"BLE: TXT 传输完成，已发送 EOF 标记");
-                    return true;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError($"BLE: 发送失败 - {ex.Message}");
-
-                    if (retried)
-                        return false;
-
-                    retried = true;
-                    _logger.LogInformation("BLE: 清空缓存的特征值后重试一次...");
-                    _writeServiceUuid = null;
-                    _writeCharacteristicUuid = null;
-                    await CacheWriteCharacteristicAsync();
-                    await Task.Delay(200);
-                }
-            }
+            _logger.LogWarning("BLE: 设备未连接");
+            return false;
         }
-        finally
+
+        if (string.IsNullOrEmpty(text))
         {
-            _sendLock.Release();
+            _logger.LogWarning("BLE: 文本内容为空");
+            return false;
+        }
+
+        var retried = false;
+
+        while (true)
+        {
+            try
+            {
+                var data = Encoding.UTF8.GetBytes(text);
+                var bookId = $"weread_{chapter}";
+                var header = X4IMProtocol.CreateHeader((uint)data.Length, bookId, 0, X4IMProtocol.FLAG_TYPE_TXT);
+                _logger.LogInformation($"BLE: 发送 TXT bookId=\"{bookId}\", size={data.Length} 字节");
+
+                // 按原应用行为：数据传完后再单独发送 EOF
+                var sent = await SendFrameAsync(header, data, appendEof: false);
+                if (!sent)
+                {
+                    return false;
+                }
+
+                await Task.Delay(50);
+                await SendEofAsync();
+                _logger.LogInformation($"BLE: TXT 传输完成，已发送 EOF 标记");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"BLE: 发送失败 - {ex.Message}");
+
+                if (retried)
+                    return false;
+
+                retried = true;
+                _logger.LogInformation("BLE: 清空缓存的特征值后重试一次...");
+                _writeServiceUuid = null;
+                _writeCharacteristicUuid = null;
+                await CacheWriteCharacteristicAsync();
+                await Task.Delay(200);
+            }
         }
     }
 
     public async Task<bool> SendEofAsync()
     {
-        await _sendLock.WaitAsync();
+        if (!IsConnected || _connectedPeripheral == null)
+        {
+            _logger.LogWarning("BLE: 设备未连接，无法发送 EOF");
+            return false;
+        }
+
+        if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
+        {
+            await CacheWriteCharacteristicAsync();
+        }
+
+        if (_writeServiceUuid == null || _writeCharacteristicUuid == null || _connectedPeripheral == null)
+        {
+            _logger.LogError("BLE: 无法找到写入特征值");
+            return false;
+        }
+
         try
         {
-            if (!await EnsureWriteCharacteristicAsync())
-            {
-                _logger.LogWarning("BLE: 写入通道不可用，跳过 EOF");
-                return false;
-            }
+            _logger.LogInformation("BLE: 手动发送 EOF 标记");
+            await _connectedPeripheral
+                .WriteCharacteristic(_writeServiceUuid, _writeCharacteristicUuid, X4IMProtocol.EOF_MARKER)
+                .FirstOrDefaultAsync();
 
-            try
-            {
-                _logger.LogInformation("BLE: 手动发送 EOF 标记");
-                await _connectedPeripheral!
-                    .WriteCharacteristic(_writeServiceUuid!, _writeCharacteristicUuid!, X4IMProtocol.EOF_MARKER)
-                    .FirstOrDefaultAsync();
-
-                _logger.LogInformation($"BLE: EOF 发送完成 ({X4IMProtocol.EOF_MARKER.Length} 字节)");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError($"BLE: 发送 EOF 失败 - {ex.Message}");
-                return false;
-            }
+            _logger.LogInformation($"BLE: EOF 发送完成 ({X4IMProtocol.EOF_MARKER.Length} 字节)");
+            return true;
         }
-        finally
+        catch (Exception ex)
         {
-            _sendLock.Release();
+            _logger.LogError($"BLE: 发送 EOF 失败 - {ex.Message}");
+            return false;
         }
     }
 
@@ -1281,34 +1255,36 @@ public class ShinyBleService : IBleService
 
     private async Task<bool> SendCommandAsync(byte command, byte[]? payload = null)
     {
-        await _sendLock.WaitAsync();
-        try
+        if (!IsConnected || _connectedPeripheral == null)
         {
-            if (!await EnsureWriteCharacteristicAsync())
-            {
-                _logger.LogWarning("BLE: 写入通道不可用，跳过命令发送");
-                return false;
-            }
-
-            var length = 1 + (payload?.Length ?? 0);
-            var buffer = new byte[length];
-            buffer[0] = command;
-            if (payload is { Length: > 0 })
-            {
-                Array.Copy(payload, 0, buffer, 1, payload.Length);
-            }
-
-            using var ms = new MemoryStream(buffer);
-            await _connectedPeripheral!
-                .WriteCharacteristicBlob(_writeServiceUuid!, _writeCharacteristicUuid!, ms)
-                .LastOrDefaultAsync();
-
-            return true;
+            return false;
         }
-        finally
+
+        if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
         {
-            _sendLock.Release();
+            await CacheWriteCharacteristicAsync();
         }
+
+        if (_writeServiceUuid == null || _writeCharacteristicUuid == null)
+        {
+            _logger.LogError("BLE: 无法找到写入特征值");
+            return false;
+        }
+
+        var length = 1 + (payload?.Length ?? 0);
+        var buffer = new byte[length];
+        buffer[0] = command;
+        if (payload is { Length: > 0 })
+        {
+            Array.Copy(payload, 0, buffer, 1, payload.Length);
+        }
+
+        using var ms = new MemoryStream(buffer);
+        await _connectedPeripheral
+            .WriteCharacteristicBlob(_writeServiceUuid, _writeCharacteristicUuid, ms)
+            .LastOrDefaultAsync();
+
+        return true;
     }
 
     public async Task<ObservableCollection<BleDeviceInfo>> ScanDevicesAsync()
