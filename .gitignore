@@ -154,8 +154,6 @@ AutoTest.Net/
 # Web workbench (less)
 .sass-cache/
 
-# OS X
-.DS_Store
 
 # Log files
 *.log
